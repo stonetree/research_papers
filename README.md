@@ -104,6 +104,42 @@ pip install streamlit requests pypdf google-genai arxiv
 3. 配置您首选的 LLM 大脑配置（例如 `deepseek-v4` 或 `gemini-2.5-pro`），填入对应的 API Key（或配置相应的系统环境变量，如 `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`）及 Endpoint URL，点击保存；
 4. 回到左侧控制台，点击 **“⚡ 测试当前 AI 大脑连通性”**，显示绿色连通性测试通过后，即宣告大仓彻底打通！
 
+### 4. 手动编辑 `api_config.json` 配置文件说明 (Manual Configuration)
+如果您不想在 Streamlit 网页前端进行编辑，也可以直接通过文本编辑器手动配置位于 `config/api_config.json` 的配置文件（若文件不存在，在项目首次运行时会自动初始化生成）。
+
+#### 配置文件参数详解：
+```json
+{
+    "_default_model": "deepseek-v4",               // 系统开机启动时首选的大脑标识 ID
+    "_global_settings": {
+        "max_concurrent_analysis": 1,              // 最大 LLM 解析并发线程数
+        "max_papers_per_batch": 1,                 // 单次批量补全的最大论文并发数
+        "analysis_granularity": "detailed"         // 剖析精细度：'summary' (概要) 或 'detailed' (完整)
+    },
+    "gemini-2.5-pro": {                            // 模型唯一标识 ID (Key)
+        "name": "Gemini 2.5 Pro (原生多模态)",      // 前端界面展示的显示友好名称
+        "provider": "gemini",                     // API 驱动类型：'gemini' 或 'openai_compatible'
+        "model": "gemini-2.5-pro",                 // 对应的官方 API 接口实际调用模型名
+        "api_key": "YOUR_GEMINI_API_KEY",          // [敏感] 您的 API 密钥。若留空，系统会自动读取对应的环境变量
+        "api_key_env": "GEMINI_API_KEY",           // API 密钥对应的系统环境变量备用键名
+        "url": ""                                  // 接口 Endpoint URL (Gemini 类型留空即可，OpenAI 兼容类型必填)
+    },
+    "deepseek-v4": {
+        "name": "DeepSeek-V4 (高性能推理)",
+        "provider": "openai_compatible",
+        "model": "deepseek-v4-flash",
+        "api_key": "",                             // 留空代表自动优先读取系统的 DEEPSEEK_API_KEY 环境变量
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "url": "https://api.deepseek.com/chat/completions"
+    }
+}
+```
+
+> [!TIP]
+> **安全推荐：首选环境变量挂载 (Environment Variables First)**
+>
+> 我们强烈推荐您将各模型配置中的 `"api_key"` 字段留空 `""`，并通过设置操作系统环境变量（如 `DEEPSEEK_API_KEY` 或 `GEMINI_API_KEY`）来动态挂载您的私密密钥。这样即便将来不小心修改了 Git 忽略规则，您的 API Key 依然处于极高的安全隔离状态！
+
 ---
 
 ## 🪐 终极移植指南
