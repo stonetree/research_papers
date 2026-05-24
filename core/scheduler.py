@@ -247,6 +247,52 @@ def _scheduler_loop():
                     
             conn.close()
             
+            # 3. 处理独立 AI 简报与技术洞察自动定时任务 (decoupled briefing/insight scheduling)
+            try:
+                from .briefing_manager import load_briefing_config, generate_daily_briefing_manually, generate_weekly_insight_manually, BASE_FOLDER_NAME
+                import json
+                
+                br_config = load_briefing_config()
+                if br_config.get("auto_scheduled", True):
+                    current_day_name = now.strftime("%A") # e.g. "Monday"
+                    state_path = os.path.join(BASE_FOLDER_NAME, ".scheduler_state.json")
+                    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+                    
+                    br_state = {}
+                    if os.path.exists(state_path):
+                        try:
+                            with open(state_path, "r", encoding="utf-8") as fs:
+                                br_state = json.load(fs)
+                        except Exception:
+                            pass
+                            
+                    # 每日简报判定
+                    daily_time = br_config.get("daily_briefing_time", "09:00")
+                    if current_time_str == daily_time and br_state.get("last_daily_date") != current_date_str:
+                        br_state["last_daily_date"] = current_date_str
+                        try:
+                            with open(state_path, "w", encoding="utf-8") as fs:
+                                json.dump(br_state, fs)
+                        except Exception:
+                            pass
+                        print(f"⏰ [简报定时激活] 到了每日简报设定时刻 {daily_time}，启动后台强联网抓取...")
+                        threading.Thread(target=generate_daily_briefing_manually, daemon=True).start()
+                        
+                    # 每周技术洞察判定
+                    weekly_day = br_config.get("weekly_insight_day", "Monday")
+                    weekly_time = br_config.get("weekly_insight_time", "10:00")
+                    if current_day_name == weekly_day and current_time_str == weekly_time and br_state.get("last_weekly_date") != current_date_str:
+                        br_state["last_weekly_date"] = current_date_str
+                        try:
+                            with open(state_path, "w", encoding="utf-8") as fs:
+                                json.dump(br_state, fs)
+                        except Exception:
+                            pass
+                        print(f"⏰ [洞察定时激活] 到了每周洞察设定时刻 {weekly_day} {weekly_time}，启动后台强联网抓取...")
+                        threading.Thread(target=generate_weekly_insight_manually, daemon=True).start()
+            except Exception as br_ex:
+                print(f"⏰ [简报守护轮询异常] {br_ex}")
+                
         except Exception as e:
             print(f"⏰ [守护进程轮询异常] 扫描触发任务时出错: {e}")
 
