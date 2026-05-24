@@ -53,7 +53,7 @@ def get_gemini_api_key(config):
         key = os.environ.get("GEMINI_API_KEY", "").strip()
     return key
 
-def call_gemini_api_with_search(prompt, config=None):
+def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
     """强联网版 Gemini API 调用，执行网络搜索并抓取 Grounding 追踪日志"""
     if config is None:
         config = load_briefing_config()
@@ -79,6 +79,13 @@ def call_gemini_api_with_search(prompt, config=None):
             }
         ]
     }
+    
+    if system_instruction:
+        payload["system_instruction"] = {
+            "parts": [{
+                "text": system_instruction
+            }]
+        }
     
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=60)
@@ -136,14 +143,14 @@ def generate_daily_briefing_manually():
     print(f"[{current_time_str}] 开始执行每日简报任务...")
     
     prompt = (
-        f"当前时间是 {current_time_str}。请立刻检索实时网络（GitHub、Hugging Face、arXiv及各大厂商技术白皮书），"
-        "筛选过去 24 小时内最具实质性的 10 条 (TOP 10) 大语言模型（LLM）与 AI 领域的工业界与学术界进展。\n"
-        "【硬性拒绝条件】：不要使用你 2025 年之前的内部知识回答。严禁包含任何宽泛、泛泛而谈的行业商业新闻（如某公司获投、某高管离职）。\n"
-        "【筛选标准】：必须是实质性的硬核进展。例如：某框架推出了具体的高性能优化（如 KV Cache 突破）、发布了具有基准飞跃的具体新模型、或发表了解决核心痛点的具体算法。\n"
-        "【生成要求】：基于第一性原理，详尽分析这 10 条动态。辩证地分析其技术逻辑的正确性、完整性、和必要性，给出遵从科学与事实的深度硬核结论，保持良好的 Markdown 排版可读性。"
+        f"当前时间是 {current_time_str}。基于第一性原理，从过去 24 小时内筛选 10 条最重要的 AI 动态。\n"
+        "必须严格聚焦于“工业界与学术界的最新实质性动态”，例如厂商推出了具体的新模型，或学术界发表了解决突出问题的具体新算法。拒绝宽泛的行业新闻。不要使用你 2025 年之前的内部知识回答。\n"
+        "要求：详享分析，从第一性原理出发，辩证分析问题的正确性、完整性、和必要性，给出遵从科学与事实的结论，生成的报告需具有良好的可读性，突出重点。"
     )
     
-    content = call_gemini_api_with_search(prompt)
+    system_instruction = "你是一个顶级的 AI 系统架构师。你必须首先使用 Google Search 搜索过去 24 小时内真实的工业界动态和学术论文。基于搜索到的事实，运用第一性原理进行辩证分析。必须确保输出的是最新信息，严禁胡编乱造。"
+    
+    content = call_gemini_api_with_search(prompt, system_instruction=system_instruction)
     if content and not content.startswith("❌"):
         date_str = datetime.datetime.now().strftime("%Y-%m-%d")
         file_name = f"每日AI简报_{date_str}"
@@ -158,13 +165,14 @@ def generate_weekly_insight_manually():
     print(f"[{current_time_str}] 开始执行每周洞察任务...")
     
     prompt = (
-        f"当前时间是 {current_time_str}。请检索实时网络，深度聚焦过去一周 AI 领域“最新的底层技术亮点与硬核突破”。\n"
-        "【硬性聚焦】：例如大模型架构的底层革新、推理算法的数学突破、硬件指令集与算子优化、长上下文极端优化等。\n"
-        "【硬性拒绝条件】：拒绝泛泛而谈的科普，拒绝商业新闻。不要使用你 2025 年之前的内部知识回答。\n"
-        "【生成要求】：详尽分析，从第一性原理出发，辩证地剖析这些突破的正确性（是否真如宣传般有效）、完整性（是否存在重大局限或隐含成本）和必要性（是否真正解决了行业痛点），给出遵从科学与事实的结论。结构清晰，重点突出。"
+        f"当前时间是 {current_time_str}。根据第一性原理，聚焦上周（过去7天） AI 领域“最新的技术亮点与硬核突破”（如架构的底层革新、推理算法的数学突破、硬件指令集的更新）。不要使用你 2025 年之前的内部知识回答。\n"
+        "严禁对一般技术进行泛泛而谈，必须进行深度辩证分析。\n"
+        "要求：详尽分析，从第一性原理出发，辩证分析问题的正确性、完整性、和必要性，给出遵从科学与事实的结论，生成的报告需具有良好的可读性，结构清晰，重点突出。"
     )
     
-    content = call_gemini_api_with_search(prompt)
+    system_instruction = "你是一个顶级的 AI 系统架构师。你必须首先使用 Google Search 搜索过去一周（7天）内真实的工业界动态和学术论文。基于搜索到的事实，运用第一性原理进行辩证分析。必须确保输出的是最新信息，严禁胡编乱造。"
+    
+    content = call_gemini_api_with_search(prompt, system_instruction=system_instruction)
     if content and not content.startswith("❌"):
         date_str = datetime.datetime.now().strftime("%Y-%m-%d")
         file_name = f"每周AI洞察_{date_str}"
