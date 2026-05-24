@@ -545,174 +545,193 @@ with tab_briefings:
     br_config = load_briefing_config()
     PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
     
-    col_control, col_viewer = st.columns([1.2, 2.0])
+    col_control, col_viewer = st.columns([1.0, 2.2])
     
     with col_control:
-        st.markdown("### ⚙️ 专属 AI 大脑与调度参数")
+        st.markdown("### 🚀 自动探测与手动收割")
         
-        # 专属 API Key 与 Model 设定
-        raw_key = br_config.get("gemini_api_key", "")
-        masked_key = st.text_input(
-            "Gemini API Key (独立于大仓配置)",
-            value=raw_key,
-            type="password",
-            placeholder="若留空则自动读取系统的 GEMINI_API_KEY 环境变量",
-            help="输入专门用于联网简报分析的 Gemini API 密钥"
-        )
-        
-        selected_model = st.selectbox(
-            "强联网分析大脑",
-            options=["gemini-1.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"],
-            index=["gemini-1.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"].index(br_config.get("model_name", "gemini-1.5-pro")) if br_config.get("model_name", "gemini-1.5-pro") in ["gemini-1.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"] else 0,
-            help="gemini-1.5-pro/gemini-2.5-pro 具备极深的技术辩证批判力；flash 版本速度极快。"
-        )
-        
-        # 测试连通性按钮
-        if st.button("⚡ 测试简报大脑连通性", key="test_briefing_api_btn", use_container_width=True):
-            resolved_key = masked_key.strip() if masked_key.strip() else os.environ.get("GEMINI_API_KEY", "").strip()
-            if not resolved_key:
-                st.error("🔴 连通性测试失败！未配置 API Key，且未检测到系统环境变量。")
-            else:
-                with st.spinner("正在向 Google Gemini 发送强联网诊断数据..."):
-                    success, message, latency = test_briefing_api_connection(resolved_key, selected_model)
-                    if success:
-                        st.success(f"🟢 **测试通过！**\n\n- 响应延时: `{latency}s`\n- {message}")
-                    else:
-                        st.error(f"🔴 **连通性测试失败！**\n\n{message}")
-                        
+        # 立即抓取按钮
+        if st.button("📰 立即抓取今日简报 (TOP 10)", use_container_width=True, help="立即检索过去24小时并生成硬核科技简报"):
+            with st.spinner("🚀 正在强联网检索并进行第一性原理剖析中..."):
+                success, result = generate_daily_briefing_manually()
+                if success:
+                    st.success("🎉 今日简报成功抓取并落盘归档！")
+                    st.rerun()
+                else:
+                    st.error(f"❌ 抓取失败: {result}")
+                    
+        if st.button("🔍 立即抓取每周技术深入洞察", use_container_width=True, help="立即深入剖析过去一周底层技术亮点"):
+            with st.spinner("🚀 正在强联网检索底物理突破并进行冷酷批判中..."):
+                success, result = generate_weekly_insight_manually()
+                if success:
+                    st.success("🎉 每周技术洞察白皮书成功生成并落盘归档！")
+                    st.rerun()
+                else:
+                    st.error(f"❌ 抓取失败: {result}")
+                    
         st.markdown("---")
-        st.markdown("### ⏰ 自动定时扫描调度")
         
-        # 定时时间配置
-        col_t1, col_t2 = st.columns([1, 1])
-        with col_t1:
+        # 将专属 AI 大脑与调度参数隐藏在折叠 Expander 中，避免占用空间
+        with st.expander("⚙️ 专属 AI 大脑与定时调度配置 (通常仅设置一次)", expanded=False):
+            st.markdown("**🧠 专属 AI 大脑配置**")
+            raw_key = br_config.get("gemini_api_key", "")
+            masked_key = st.text_input(
+                "Gemini API Key (独立于大仓配置)",
+                value=raw_key,
+                type="password",
+                placeholder="若留空则自动读取系统 GEMINI_API_KEY",
+                help="输入专门用于联网简报分析的 Gemini API 密钥"
+            )
+            
+            selected_model = st.selectbox(
+                "强联网分析大脑",
+                options=["gemini-1.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"],
+                index=["gemini-1.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"].index(br_config.get("model_name", "gemini-1.5-pro")) if br_config.get("model_name", "gemini-1.5-pro") in ["gemini-1.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"] else 0,
+                help="gemini-1.5-pro/gemini-2.5-pro 具备极深的技术辩证批判力；flash 版本速度极快。"
+            )
+            
+            # 测试连通性按钮
+            if st.button("⚡ 测试简报大脑连通性", key="test_briefing_api_btn", use_container_width=True):
+                resolved_key = masked_key.strip() if masked_key.strip() else os.environ.get("GEMINI_API_KEY", "").strip()
+                if not resolved_key:
+                    st.error("🔴 连通性测试失败！未配置 API Key，且未检测到系统环境变量。")
+                else:
+                    with st.spinner("正在向 Google Gemini 发送强联网诊断数据..."):
+                        success, message, latency = test_briefing_api_connection(resolved_key, selected_model)
+                        if success:
+                            st.success(f"🟢 **测试通过！**\n\n- 响应延时: `{latency}s`\n- {message}")
+                        else:
+                            st.error(f"🔴 **连通性测试失败！**\n\n{message}")
+                            
+            st.markdown("---")
+            st.markdown("**⏰ 自动定时扫描调度**")
+            
             daily_time_str = st.text_input(
                 "每日简报时间",
                 value=br_config.get("daily_briefing_time", "09:00"),
                 help="格式 HH:MM，如 09:00"
             )
-        with col_t2:
             weekly_time_str = st.text_input(
                 "每周洞察时间",
                 value=br_config.get("weekly_insight_time", "10:00"),
                 help="格式 HH:MM，如 10:00"
             )
-            
-        col_d1, col_d2 = st.columns([1, 1])
-        with col_d1:
             weekly_day = st.selectbox(
                 "每周洞察运行日",
                 options=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
                 index=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].index(br_config.get("weekly_insight_day", "Monday")),
                 help="选择每周执行深入技术洞察报告的星期几"
             )
-        with col_d2:
             auto_scheduled = st.toggle(
                 "启用自动定时守护",
                 value=br_config.get("auto_scheduled", True),
                 help="开启后，后台轮询线程会在设定的时刻自动执行强联网抓取"
             )
             
-        # 保存独立配置按钮
-        if st.button("💾 保存专属配置与调度设定", key="save_briefing_config_btn", use_container_width=True):
-            # 时间格式校验
-            time_pattern = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
-            if not time_pattern.match(daily_time_str.strip()) or not time_pattern.match(weekly_time_str.strip()):
-                st.error("❌ 格式错误！每日简报或每周洞察的时间格式必须为 HH:MM。")
-            else:
-                updated_br_config = {
-                    "gemini_api_key": masked_key.strip(),
-                    "model_name": selected_model,
-                    "daily_briefing_time": daily_time_str.strip(),
-                    "weekly_insight_time": weekly_time_str.strip(),
-                    "weekly_insight_day": weekly_day,
-                    "auto_scheduled": auto_scheduled
-                }
-                if save_briefing_config(updated_br_config):
-                    st.success("🎉 简报专属配置与调度设置保存成功！已即时热重载生效。")
-                    st.rerun()
+            # 保存独立配置按钮
+            if st.button("💾 保存专属配置与调度设定", key="save_briefing_config_btn", use_container_width=True):
+                # 时间格式校验
+                time_pattern = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+                if not time_pattern.match(daily_time_str.strip()) or not time_pattern.match(weekly_time_str.strip()):
+                    st.error("❌ 格式错误！每日简报或每周洞察的时间格式必须为 HH:MM。")
                 else:
-                    st.error("❌ 保存配置失败，请检查写入权限。")
-                    
-        st.markdown("---")
-        st.markdown("### 🚀 物理动作与手动收割")
-        
-        # 立即抓取按钮
-        col_btn_d, col_btn_w = st.columns([1, 1])
-        with col_btn_d:
-            if st.button("📰 立即抓取今日简报", use_container_width=True, help="立即检索过去24小时并生成硬核科技简报"):
-                with st.spinner("🚀 正在强联网检索并进行第一性原理剖析中..."):
-                    success, result = generate_daily_briefing_manually()
-                    if success:
-                        st.success("🎉 今日简报成功抓取并落盘归档！")
+                    updated_br_config = {
+                        "gemini_api_key": masked_key.strip(),
+                        "model_name": selected_model,
+                        "daily_briefing_time": daily_time_str.strip(),
+                        "weekly_insight_time": weekly_time_str.strip(),
+                        "weekly_insight_day": weekly_day,
+                        "auto_scheduled": auto_scheduled
+                    }
+                    if save_briefing_config(updated_br_config):
+                        st.success("🎉 简报专属配置与调度设置保存成功！已即时热重载生效。")
                         st.rerun()
                     else:
-                        st.error(f"❌ 抓取失败: {result}")
-        with col_btn_w:
-            if st.button("🔍 立即抓取每周洞察", use_container_width=True, help="立即深入剖析过去一周底层技术亮点"):
-                with st.spinner("🚀 正在强联网检索底物理突破并进行冷酷批判中..."):
-                    success, result = generate_weekly_insight_manually()
-                    if success:
-                        st.success("🎉 每周技术洞察白皮书成功生成并落盘归档！")
-                        st.rerun()
-                    else:
-                        st.error(f"❌ 抓取失败: {result}")
+                        st.error("❌ 保存配置失败，请检查写入权限。")
                         
     with col_viewer:
-        st.markdown("### 📂 强联网 AI 报告历史归档与交互式阅读")
+        st.markdown("### 📂 强联网 AI 报告历史归档与分类阅读")
         
         # 获取报告列表
         archived_reports = list_archived_reports()
         
-        if not archived_reports:
-            st.info("💡 归档库空空如也。请先在左侧点击“立即抓取”或等待后台定时任务自动归档！")
-        else:
-            # 树形筛选器
-            year_months = sorted(list(set(r["year_month"] for r in archived_reports)), reverse=True)
-            selected_ym = st.selectbox("选择归档年月", year_months)
-            
-            # 过滤指定年月的报告
-            ym_reports = [r for r in archived_reports if r["year_month"] == selected_ym]
-            weeks = sorted(list(set(r["week"] for r in ym_reports)), reverse=True)
-            selected_wk = st.selectbox("选择归档周数", weeks)
-            
-            # 过滤指定周数的报告
-            wk_reports = [r for r in ym_reports if r["week"] == selected_wk]
-            categories = sorted(list(set(r["category"] for r in wk_reports)))
-            selected_cat = st.selectbox("选择报告分类", categories)
-            
-            # 最终展示过滤结果
-            final_reports = [r for r in wk_reports if r["category"] == selected_cat]
-            
-            st.markdown("---")
-            if not final_reports:
-                st.info("💡 该分类下暂无已归档报告。")
+        sub_tab_daily, sub_tab_weekly = st.tabs(["📰 每日 AI 进展简报 (TOP 10)", "🔍 每周 AI 技术深入洞察"])
+        
+        with sub_tab_daily:
+            daily_reports = [r for r in archived_reports if r["category"] == "每日简报"]
+            if not daily_reports:
+                st.info("💡 暂无已归档的每日 AI 进展简报。请先在左侧点击“立即抓取今日简报 (TOP 10)”！")
             else:
-                st.caption(f"📅 当前选定: `{selected_ym}` > `{selected_wk}` > `{selected_cat}` | 共有 `{len(final_reports)}` 份归档报告")
+                col_ym, col_wk = st.columns([1, 1])
+                with col_ym:
+                    d_yms = sorted(list(set(r["year_month"] for r in daily_reports)), reverse=True)
+                    d_selected_ym = st.selectbox("归档年月", d_yms, key="daily_ym_selector")
+                with col_wk:
+                    d_ym_filtered = [r for r in daily_reports if r["year_month"] == d_selected_ym]
+                    d_wks = sorted(list(set(r["week"] for r in d_ym_filtered)), reverse=True)
+                    d_selected_wk = st.selectbox("归档周数", d_wks, key="daily_wk_selector")
                 
-                # 报告选择器
-                report_titles = [r["title"] for r in final_reports]
-                selected_title = st.selectbox("选择要阅读的报告", report_titles)
-                
-                selected_report = [r for r in final_reports if r["title"] == selected_title][0]
-                
-                # 读取报告内容并渲染
-                report_file_path = os.path.join(PROJECT_ROOT, selected_report["path"])
-                if os.path.exists(report_file_path):
-                    try:
-                        with open(report_file_path, "r", encoding="utf-8") as f_rep:
-                            report_content = f_rep.read()
-                            
-                        # 精美的 Glassmorphism Card 容器
-                        with st.container(border=True):
-                            st.markdown(f"## 📖 {selected_title}")
-                            st.caption(f"📝 相对物理路径: `{selected_report['path']}` | 🕒 归档时间: `{datetime.datetime.fromtimestamp(selected_report['mtime']).strftime('%Y-%m-%d %H:%M:%S')}`")
-                            st.markdown("---")
-                            st.markdown(report_content)
-                    except Exception as e_read:
-                        st.error(f"❌ 读取报告文件失败: {e_read}")
+                final_daily_reports = [r for r in d_ym_filtered if r["week"] == d_selected_wk]
+                if not final_daily_reports:
+                    st.info("💡 该周下暂无已归档的简报。")
                 else:
-                    st.error("❌ 报告物理文件已在磁盘中被移除或移动。")
+                    d_titles = [r["title"] for r in final_daily_reports]
+                    d_selected_title = st.selectbox("选择历史简报", d_titles, key="daily_report_title_selector")
+                    
+                    d_rep = [r for r in final_daily_reports if r["title"] == d_selected_title][0]
+                    d_path = os.path.join(PROJECT_ROOT, d_rep["path"])
+                    
+                    if os.path.exists(d_path):
+                        try:
+                            with open(d_path, "r", encoding="utf-8") as f_d:
+                                content = f_d.read()
+                            with st.container(border=True):
+                                st.markdown(f"## {d_selected_title}")
+                                st.caption(f"📝 相对物理路径: `{d_rep['path']}` | 🕒 归档时间: `{datetime.datetime.fromtimestamp(d_rep['mtime']).strftime('%Y-%m-%d %H:%M:%S')}`")
+                                st.markdown("---")
+                                st.markdown(content)
+                        except Exception as ex:
+                            st.error(f"❌ 读取简报文件失败: {ex}")
+                    else:
+                        st.error("❌ 简报物理文件不存在。")
+                        
+        with sub_tab_weekly:
+            weekly_reports = [r for r in archived_reports if r["category"] == "每周洞察报告"]
+            if not weekly_reports:
+                st.info("💡 暂无已归档的每周 AI 技术深入洞察。请先在左侧点击“立即抓取每周技术深入洞察”！")
+            else:
+                col_ym, col_wk = st.columns([1, 1])
+                with col_ym:
+                    w_yms = sorted(list(set(r["year_month"] for r in weekly_reports)), reverse=True)
+                    w_selected_ym = st.selectbox("归档年月", w_yms, key="weekly_ym_selector")
+                with col_wk:
+                    w_ym_filtered = [r for r in weekly_reports if r["year_month"] == w_selected_ym]
+                    w_wks = sorted(list(set(r["week"] for r in w_ym_filtered)), reverse=True)
+                    w_selected_wk = st.selectbox("归档周数", w_wks, key="weekly_wk_selector")
+                
+                final_weekly_reports = [r for r in w_ym_filtered if r["week"] == w_selected_wk]
+                if not final_weekly_reports:
+                    st.info("💡 该周下暂无已归档的洞察报告。")
+                else:
+                    w_titles = [r["title"] for r in final_weekly_reports]
+                    w_selected_title = st.selectbox("选择历史洞察报告", w_titles, key="weekly_report_title_selector")
+                    
+                    w_rep = [r for r in final_weekly_reports if r["title"] == w_selected_title][0]
+                    w_path = os.path.join(PROJECT_ROOT, w_rep["path"])
+                    
+                    if os.path.exists(w_path):
+                        try:
+                            with open(w_path, "r", encoding="utf-8") as f_w:
+                                content = f_w.read()
+                            with st.container(border=True):
+                                st.markdown(f"## {w_selected_title}")
+                                st.caption(f"📝 相对物理路径: `{w_rep['path']}` | 🕒 归档时间: `{datetime.datetime.fromtimestamp(w_rep['mtime']).strftime('%Y-%m-%d %H:%M:%S')}`")
+                                st.markdown("---")
+                                st.markdown(content)
+                        except Exception as ex:
+                            st.error(f"❌ 读取每周洞察文件失败: {ex}")
+                    else:
+                        st.error("❌ 每周洞察物理文件不存在。")
 
 with tab_global_config:
     st.subheader("⚙️ 全局系统配置中心")
