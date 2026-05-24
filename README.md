@@ -123,11 +123,11 @@ pip install streamlit requests pypdf google-genai arxiv
         "max_papers_per_batch": 1,                 // 单次批量补全的最大论文并发数
         "analysis_granularity": "detailed"         // 剖析精细度：'summary' (概要) 或 'detailed' (完整)
     },
-    "gemini-2.5-pro": {                            // 模型唯一标识 ID (Key)
-        "name": "Gemini 2.5 Pro (原生多模态)",      // 前端界面展示的显示友好名称
-        "provider": "gemini",                     // API 驱动类型：'gemini' 或 'openai_compatible'
-        "model": "gemini-2.5-pro",                 // 对应的官方 API 接口实际调用模型名
-        "api_key": "YOUR_GEMINI_API_KEY",          // [敏感] 您的 API 密钥。若留空，系统会自动读取对应的环境变量
+    "gemini-3.5-flash": {                          // 模型唯一标识 ID (Key)
+        "name": "Gemini 3.5 Flash (最新多模态极速)", // 前端界面展示的显示友好名称
+        "provider": "gemini",                      // API 驱动类型：'gemini' 或 'openai_compatible'
+        "model": "gemini-3.5-flash",               // 对应的官方 API 接口实际调用模型名
+        "api_key": "",                             // [敏感] 您的 API 密钥。若留空，系统会自动读取对应的环境变量
         "api_key_env": "GEMINI_API_KEY",           // API 密钥对应的系统环境变量备用键名
         "url": ""                                  // 接口 Endpoint URL (Gemini 类型留空即可，OpenAI 兼容类型必填)
     },
@@ -146,6 +146,23 @@ pip install streamlit requests pypdf google-genai arxiv
 > **安全推荐：首选环境变量挂载 (Environment Variables First)**
 >
 > 我们强烈推荐您将各模型配置中的 `"api_key"` 字段留空 `""`，并通过设置操作系统环境变量（如 `DEEPSEEK_API_KEY` 或 `GEMINI_API_KEY`）来动态挂载您的私密密钥。这样即便将来不小心修改了 Git 忽略规则，您的 API Key 依然处于极高的安全隔离状态！
+
+---
+
+### 5. 手动编辑 `briefing_config.json` 配置文件说明 (AI Briefing Configuration)
+为了将**大仓**与**24小时雷达与技术洞察**模块的 API 密钥及调度配置进行完全隔离，本系统设立了独立的简报配置文件 `config/briefing_config.json`。您可以手动创建或通过网页前端的折叠配置面板自动更新。
+
+#### 配置文件参数详解：
+```json
+{
+    "gemini_api_key": "",                     // 专属 Gemini API 密钥。若留空，系统会自动读取系统全局环境变量 GEMINI_API_KEY
+    "model_name": "gemini-3.5-flash",         // 联网简报专用分析大脑，支持："gemini-2.5-flash" 或 "gemini-3.5-flash"
+    "daily_briefing_time": "09:00",           // 每日 AI 进展简报的自动抓取运行时间点 (格式 HH:MM)
+    "weekly_insight_time": "10:00",           // 每周 AI 技术深入洞察的自动抓取运行时间点 (格式 HH:MM)
+    "weekly_insight_day": "Monday",           // 每周 AI 洞察在每周的星期几触发 (支持 "Monday", "Tuesday" 等英文全称)
+    "auto_scheduled": true                    // 是否开启后台常驻定时轮询抓取任务守护 (true/false)
+}
+```
 
 ---
 
