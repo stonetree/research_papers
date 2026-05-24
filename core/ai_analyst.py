@@ -19,7 +19,7 @@ def extract_text_from_pdf(pdf_path):
         print(f"提取 PDF 文本失败: {e}")
         return ""
 
-def analyze_and_store_paper(paper_id, pdf_path, title, model_id="gemini-2.5-pro"):
+def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
     from .database import resolve_pdf_path
     pdf_path = resolve_pdf_path(pdf_path)
     if not os.path.exists(pdf_path):

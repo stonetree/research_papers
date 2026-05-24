@@ -8,19 +8,11 @@ def load_raw_config():
     """读取原始 JSON 配置字典（包含元数据和全局设置）"""
     if not os.path.exists(CONFIG_PATH):
         default_config = {
-            "_default_model": "gemini-2.5-pro",
+            "_default_model": "deepseek-v4",
             "_global_settings": {
                 "max_concurrent_analysis": 2,
                 "max_papers_per_batch": 3,
                 "analysis_granularity": "summary"  # 'summary' (概要) 或 'detailed' (完整)
-            },
-            "gemini-2.5-pro": {
-                "name": "Gemini 2.5 Pro (原生多模态)",
-                "provider": "gemini",
-                "model": "gemini-2.5-pro",
-                "api_key": "",
-                "api_key_env": "GEMINI_API_KEY",
-                "url": ""
             },
             "deepseek-v4": {
                 "name": "DeepSeek-V4 (高性能推理)",
@@ -72,7 +64,7 @@ def load_api_config():
 def get_default_model():
     """获取设置的默认模型 ID"""
     raw = load_raw_config()
-    return raw.get("_default_model", "gemini-2.5-pro")
+    return raw.get("_default_model", "deepseek-v4")
 
 def set_default_model(model_id):
     """保存并持久化默认模型 ID"""

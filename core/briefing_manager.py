@@ -15,7 +15,7 @@ def load_briefing_config():
     if not os.path.exists(CONFIG_PATH):
         default_config = {
             "gemini_api_key": "",
-            "model_name": "gemini-1.5-pro",
+            "model_name": "gemini-2.5-flash",
             "daily_briefing_time": "09:00",
             "weekly_insight_time": "10:00",
             "weekly_insight_day": "Monday",
@@ -62,7 +62,7 @@ def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
     if not api_key:
         return "❌ 错误: 未配置 Gemini API Key，且未检测到全局 GEMINI_API_KEY 环境变量。"
         
-    model_name = config.get("model_name", "gemini-1.5-pro")
+    model_name = config.get("model_name", "gemini-2.5-flash")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     

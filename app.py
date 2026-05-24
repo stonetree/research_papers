@@ -585,9 +585,9 @@ with tab_briefings:
             
             selected_model = st.selectbox(
                 "强联网分析大脑",
-                options=["gemini-1.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"],
-                index=["gemini-1.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"].index(br_config.get("model_name", "gemini-1.5-pro")) if br_config.get("model_name", "gemini-1.5-pro") in ["gemini-1.5-pro", "gemini-2.5-flash", "gemini-2.5-pro"] else 0,
-                help="gemini-1.5-pro/gemini-2.5-pro 具备极深的技术辩证批判力；flash 版本速度极快。"
+                options=["gemini-2.5-flash"],
+                index=0,
+                help="使用 gemini-2.5-flash 进行快速联网分析与技术简报。"
             )
             
             # 测试连通性按钮
