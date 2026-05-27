@@ -284,6 +284,16 @@ with tab_library:
                     st.caption(f"🧠 驱动智能大脑: `{paper['model_name'] or '未知'}`")
                     with st.container(border=True):
                         st.markdown(paper['dialectical_analysis'])
+                    
+                    # 一键导出为 Markdown，调用浏览器原生保存路径选择窗口
+                    st.download_button(
+                        label="📥 一键导出 Markdown 报告",
+                        data=paper['dialectical_analysis'],
+                        file_name=f"{paper['title']}_AI学术解构报告.md",
+                        mime="text/markdown",
+                        key=f"export_detail_{paper['paper_id']}",
+                        use_container_width=True
+                    )
                 else:
                     st.warning("⏳ 暂无该论文的 AI 深度解构。")
                     brain_name = api_models[selected_brain_key].get("name", selected_brain_key)
@@ -405,6 +415,16 @@ with tab_library:
                             if paper['dialectical_analysis']:
                                 st.caption(f"驱动大脑: `{paper['model_name']}`")
                                 st.markdown(paper['dialectical_analysis'])
+                                
+                                # 一键导出为 Markdown，调用浏览器原生保存路径选择窗口
+                                st.download_button(
+                                    label="📥 一键导出 Markdown 报告",
+                                    data=paper['dialectical_analysis'],
+                                    file_name=f"{paper['title']}_AI学术解构报告.md",
+                                    mime="text/markdown",
+                                    key=f"export_list_{paper['paper_id']}",
+                                    use_container_width=True
+                                )
                             else:
                                 st.warning("⏳ 暂无该论文的 AI 深度解构。")
                                 brain_name = api_models[selected_brain_key].get("name", selected_brain_key)
