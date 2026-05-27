@@ -231,99 +231,18 @@ if st.session_state.get("unanalyzed_papers"):
 tab_library, tab_scheduler, tab_briefings, tab_global_config = st.tabs(["📂 本地沉淀文献大仓", "⏰ 智能定时扫描与解构调度", "🌐 AI 24h雷达与技术洞察", "⚙️ 全局系统配置"])
 
 with tab_library:
-    # 视图路由：详情页 vs 列表页
-    active_paper_id = st.session_state.get("active_view_paper_id")
+    # 建立双栏布局：左栏为论文导航/搜索列表，右栏为当前选中的论文解构详情（Zotero/Email经典双栏）
+    col_left, col_right = st.columns([1, 1.3])
     
-    if active_paper_id:
-        # --- 详情页视图 (高级全景解构详情页) ---
-        conn = get_db_connection()
-        paper = conn.execute("""
-            SELECT p.*, s.dialectical_analysis, s.model_name 
-            FROM papers p
-            LEFT JOIN ai_summaries s ON p.paper_id = s.paper_id
-            WHERE p.paper_id = ?
-        """, (active_paper_id,)).fetchone()
-        conn.close()
-        
-        if paper:
-            # 顶部返回按钮与标题
-            col_back, col_title = st.columns([1.5, 6])
-            with col_back:
-                if st.button("⬅️ 返回结果列表", key="back_btn_top", use_container_width=True):
-                    st.session_state["active_view_paper_id"] = None
-                    st.rerun()
-            with col_title:
-                st.markdown(f"### 📖 论文解构报告: 《{paper['title']}》")
-                
-            st.markdown("---")
-            
-            # 双栏精美布局
-            col_meta, col_report = st.columns([1, 1.2])
-            
-            with col_meta:
-                st.subheader("📋 论文原厂元数据")
-                st.markdown(f"**🏷️ 顶会/期刊**: `{paper['venue'] or '顶会/未标注'}`")
-                st.markdown(f"**📅 发表年份**: `{paper['year'] or '未知'}`")
-                st.markdown(f"**📈 引用频次**: `{paper['citations'] or 0}` 次")
-                st.markdown(f"**👥 作者团队**: {paper['authors'] or '未知'}")
-                st.markdown(f"**📝 物理文件**: `{os.path.basename(paper['pdf_path']) if paper['pdf_path'] else '未关联'}`")
-                
-                # 本地 PDF 校验状态
-                resolved_pdf = resolve_pdf_path(paper['pdf_path']) if paper['pdf_path'] else ""
-                if resolved_pdf and os.path.exists(resolved_pdf):
-                    st.success("💾 本地 PDF 文件已安全关联")
-                else:
-                    st.error("❌ 本地物理文件缺失")
-                    
-                st.markdown("**Abstract (摘要)**:")
-                st.info(paper['abstract'] or "暂无摘要描述。")
-                
-            with col_report:
-                st.subheader("💡 首席科学家 AI 辩证剖析报告")
-                if paper['dialectical_analysis']:
-                    st.caption(f"🧠 驱动智能大脑: `{paper['model_name'] or '未知'}`")
-                    with st.container(border=True):
-                        st.markdown(paper['dialectical_analysis'])
-                    
-                    # 一键导出为 Markdown，调用浏览器原生保存路径选择窗口
-                    st.download_button(
-                        label="📥 一键导出 Markdown 报告",
-                        data=paper['dialectical_analysis'],
-                        file_name=f"{paper['title']}_AI学术解构报告.md",
-                        mime="text/markdown",
-                        key=f"export_detail_{paper['paper_id']}",
-                        use_container_width=True
-                    )
-                else:
-                    st.warning("⏳ 暂无该论文的 AI 深度解构。")
-                    brain_name = api_models[selected_brain_key].get("name", selected_brain_key)
-                    if st.button(f"🤖 立即激活 {brain_name} 技术解构", key=f"detail_activate_{paper['paper_id']}"):
-                        with st.spinner(f"正在使用 {brain_name} 深度剖析论文中..."):
-                            analysis_text = analyze_and_store_paper(paper['paper_id'], paper['pdf_path'], paper['title'], model_id=selected_brain_key)
-                            if analysis_text.startswith("❌"):
-                                st.error(analysis_text)
-                            else:
-                                st.rerun()
-            
-            st.markdown("---")
-            if st.button("⬅️ 返回结果列表", key="back_btn_bottom"):
-                st.session_state["active_view_paper_id"] = None
-                st.rerun()
-        else:
-            st.error("❌ 未找到指定的论文，可能已被移除。")
-            if st.button("⬅️ 返回列表"):
-                st.session_state["active_view_paper_id"] = None
-                st.rerun()
-                
-    else:
-        # --- 列表页视图 ---
-        st.subheader("📂 个人智能学术论文大仓")
+    with col_left:
+        st.subheader("📂 文献大仓导航")
         
         # 增加搜索框与状态同步
         search_keyword = st.text_input(
-            "🔍 全文搜索大模型论文分析报告 (输入关键字直接筛选最相关的 TOP 10 黄金文献)", 
+            "🔍 全文搜索大模型分析报告", 
             value=st.session_state.get("search_keyword", ""),
-            placeholder="例如: GPU, FlashAttention, 异构计算, 拓扑等..."
+            placeholder="输入关键字进行过滤...",
+            key="library_search_input"
         )
         st.session_state["search_keyword"] = search_keyword.strip()
         
@@ -351,90 +270,156 @@ with tab_library:
                         "match_count": match_count
                     })
                     
-            # 按匹配频次降书/降序排序
+            # 按匹配频次降序排序
             matched_results.sort(key=lambda x: x["match_count"], reverse=True)
             top_results = matched_results[:10]
-            
-            if not top_results:
-                st.warning(f"📭 未在大仓中检索到包含关键字 `{st.session_state['search_keyword']}` 的 AI 论文剖析报告。建议更换关键字，或先下载论文并激活 AI 技术解构！")
-            else:
-                st.success(f"🎯 成功检索到 `{len(top_results)}` 篇相关黄金文献（已为您按匹配相关度以降序排列，最多展示 TOP 10）：")
-                
-                # 渲染搜索结果列表
-                for idx, result in enumerate(top_results):
-                    paper = result["paper"]
-                    count = result["match_count"]
-                    
-                    with st.container(border=True):
-                        st.markdown(f"##### 📄 {idx + 1}. [{paper['venue'] or '顶会'}] {paper['title']} ({paper['year']})")
-                        st.caption(f"👥 作者团队: {paper['authors'] or '未知'} | 📈 引用: {paper['citations']} | 🎯 匹配频次: **{count} 次关键字匹配**")
-                        
-                        # 提取高亮上下文片段
-                        highlighted_snippet = extract_snippet_with_highlight(paper['dialectical_analysis'], st.session_state["search_keyword"])
-                        st.markdown(f"**🔍 匹配上下文摘要**:\n{highlighted_snippet}", unsafe_allow_html=True)
-                        
-                        col_action, _ = st.columns([1.8, 5])
-                        with col_action:
-                            if st.button("📖 查看 AI 论文解构报告", key=f"view_report_btn_{paper['paper_id']}", use_container_width=True):
-                                st.session_state["active_view_paper_id"] = paper["paper_id"]
-                                st.rerun()
+            papers_to_show = [r["paper"] for r in top_results]
         else:
-            # 默认的无搜索词时，降序展示所有已下载/入库的文献
+            # 默认无搜索词，展示所有已入库的文献
             query = """
                 SELECT p.*, s.dialectical_analysis, s.model_name 
                 FROM papers p
                 LEFT JOIN ai_summaries s ON p.paper_id = s.paper_id
                 ORDER BY p.created_at DESC
             """
-            papers_list = conn.execute(query).fetchall()
+            papers_to_show = conn.execute(query).fetchall()
             conn.close()
             
-            if not papers_list:
-                st.info("💡 目前本地大仓空空如也，请在左侧选择方向并点击【触发雷达扫描】！")
+        # 维护当前可视列表的 IDs，便于执行“上一篇 / 下一篇”的快速跳转
+        paper_ids = [p["paper_id"] for p in papers_to_show]
+        st.session_state["library_paper_ids"] = paper_ids
+        
+        # 默认选中第一篇
+        active_paper_id = st.session_state.get("active_view_paper_id")
+        if active_paper_id not in paper_ids and paper_ids:
+            active_paper_id = paper_ids[0]
+            st.session_state["active_view_paper_id"] = active_paper_id
+            
+        # 渲染列表极简卡片，固定滚动条高度避免拉伸右侧
+        if not papers_to_show:
+            if st.session_state["search_keyword"]:
+                st.warning("📭 未检索到匹配报告。")
             else:
-                # 渲染常规的论文列表网格（原 chronological list）
-                for paper in papers_list:
-                    pdf_basename = os.path.basename(paper['pdf_path']) if paper['pdf_path'] else "未关联"
-                    with st.expander(f"📄 [{paper['venue'] or '顶会'}] {paper['title']} ({paper['year']}) — 📈 引用: {paper['citations']} 📝 关联路径: {pdf_basename}"):
-                        col1, col2 = st.columns([1, 1])
+                st.info("💡 大仓空空如也，请在左侧触发雷达扫描或物理同步！")
+        else:
+            st.caption(f"📚 可视文献列表 (共 {len(papers_to_show)} 篇)：")
+            with st.container(height=720):
+                for p in papers_to_show:
+                    p_id = p["paper_id"]
+                    is_selected = (p_id == active_paper_id)
+                    
+                    card_emoji = "📖" if is_selected else "📄"
+                    ai_status = "🟢" if p["dialectical_analysis"] else "⏳"
+                    
+                    card_title = f"{card_emoji} {p['title']}"
+                    card_meta = f"{ai_status} [{p['venue'] or '顶会'}] {p['year']} | 📈 引用: {p['citations']}"
+                    
+                    # 渲染为小卡片样式
+                    with st.container(border=True):
+                        st.markdown(f"**{card_title}**")
+                        st.caption(card_meta)
                         
-                        with col1:
-                            st.subheader("📋 论文原厂元数据")
-                            st.caption(f"**作者团队**: {paper['authors']}")
-                            st.markdown(f"**Abstract (摘要)**:\n{paper['abstract'] or '暂无描述'}")
+                        # 如果搜索模式处于激活态，展示关键词高亮小片段
+                        if st.session_state["search_keyword"] and p["dialectical_analysis"]:
+                            snippet = extract_snippet_with_highlight(p['dialectical_analysis'], st.session_state["search_keyword"])
+                            st.markdown(f"<div style='font-size: 0.85rem; color: #555; background: #f0f2f6; padding: 4px; border-radius: 4px; margin-bottom: 6px;'>🔍 {snippet}</div>", unsafe_allow_html=True)
                             
-                            # 本地打开物理文件按钮
-                            resolved_pdf = resolve_pdf_path(paper['pdf_path']) if paper['pdf_path'] else ""
-                            if resolved_pdf and os.path.exists(resolved_pdf):
-                                st.success("💾 本地 PDF 文件已安全关联")
-                            else:
-                                st.error("❌ 本地物理文件缺失")
-                                
-                        with col2:
-                            st.subheader("💡 首席科学家 AI 辩证剖析报告")
-                            if paper['dialectical_analysis']:
-                                st.caption(f"驱动大脑: `{paper['model_name']}`")
-                                st.markdown(paper['dialectical_analysis'])
-                                
-                                # 一键导出为 Markdown，调用浏览器原生保存路径选择窗口
-                                st.download_button(
-                                    label="📥 一键导出 Markdown 报告",
-                                    data=paper['dialectical_analysis'],
-                                    file_name=f"{paper['title']}_AI学术解构报告.md",
-                                    mime="text/markdown",
-                                    key=f"export_list_{paper['paper_id']}",
-                                    use_container_width=True
-                                )
-                            else:
-                                st.warning("⏳ 暂无该论文的 AI 深度解构。")
-                                brain_name = api_models[selected_brain_key].get("name", selected_brain_key)
-                                if st.button(f"🤖 立即激活 {brain_name} 技术解构", key=paper['paper_id']):
-                                    with st.spinner(f"正在使用 {brain_name} 深度剖析论文中..."):
-                                        analysis_text = analyze_and_store_paper(paper['paper_id'], paper['pdf_path'], paper['title'], model_id=selected_brain_key)
-                                        if analysis_text.startswith("❌"):
-                                            st.error(analysis_text)
-                                        else:
-                                            st.rerun()
+                        # 点选按钮
+                        btn_label = "👉 正在阅读" if is_selected else "📖 极速阅读解构报告"
+                        if st.button(btn_label, key=f"select_btn_{p_id}", use_container_width=True, type="primary" if is_selected else "secondary"):
+                            st.session_state["active_view_paper_id"] = p_id
+                            st.rerun()
+
+    with col_right:
+        # 获取当前选中论文的详细元数据与 AI 剖析
+        paper = None
+        if active_paper_id:
+            conn = get_db_connection()
+            paper = conn.execute("""
+                SELECT p.*, s.dialectical_analysis, s.model_name 
+                FROM papers p
+                LEFT JOIN ai_summaries s ON p.paper_id = s.paper_id
+                WHERE p.paper_id = ?
+            """, (active_paper_id,)).fetchone()
+            conn.close()
+            
+        if paper:
+            # 顶部导航行：上一篇、下一篇、当前进度
+            try:
+                curr_idx = paper_ids.index(active_paper_id)
+            except ValueError:
+                curr_idx = -1
+                
+            if curr_idx != -1:
+                nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 2.5])
+                with nav_col1:
+                    prev_disabled = (curr_idx == 0)
+                    if st.button("⏮️ 上一篇论文", key="prev_paper_btn", use_container_width=True, disabled=prev_disabled):
+                        st.session_state["active_view_paper_id"] = paper_ids[curr_idx - 1]
+                        st.rerun()
+                with nav_col2:
+                    next_disabled = (curr_idx == len(paper_ids) - 1)
+                    if st.button("下一篇论文 ⏭️", key="next_paper_btn", use_container_width=True, disabled=next_disabled):
+                        st.session_state["active_view_paper_id"] = paper_ids[curr_idx + 1]
+                        st.rerun()
+                with nav_col3:
+                    st.markdown(f"<div style='padding-top: 6px; font-size: 0.9rem; color: #666;'>📖 当前第 <b>{curr_idx + 1}/{len(paper_ids)}</b> 篇</div>", unsafe_allow_html=True)
+            
+            st.markdown(f"### 📘 《{paper['title']}》")
+            st.markdown("---")
+            
+            # 双栏或展开折叠卡展示基础元数据
+            with st.expander("📋 论文基础元数据与物理 PDF 关联状态", expanded=True):
+                meta_c1, meta_c2 = st.columns([1, 1])
+                with meta_c1:
+                    st.markdown(f"**🏷️ 顶会/期刊**: `{paper['venue'] or '顶会/未标注'}`")
+                    st.markdown(f"**📅 发表年份**: `{paper['year'] or '未知'}`")
+                    st.markdown(f"**📈 引用频次**: `{paper['citations'] or 0}` 次")
+                    st.markdown(f"**👥 作者团队**: {paper['authors'] or '未知'}")
+                with meta_c2:
+                    st.markdown(f"**📝 物理文件**: `{os.path.basename(paper['pdf_path']) if paper['pdf_path'] else '未关联'}`")
+                    resolved_pdf = resolve_pdf_path(paper['pdf_path']) if paper['pdf_path'] else ""
+                    if resolved_pdf and os.path.exists(resolved_pdf):
+                        st.success("💾 本地 PDF 文件已安全关联")
+                    else:
+                        st.error("❌ 本地物理文件缺失")
+                st.markdown("**Abstract (摘要)**:")
+                st.info(paper['abstract'] or "暂无摘要描述。")
+                
+            st.markdown("---")
+            
+            # 展示 AI 辩证报告
+            st.subheader("💡 首席科学家 AI 辩证剖析报告")
+            if paper['dialectical_analysis']:
+                st.caption(f"🧠 驱动智能大脑: `{paper['model_name'] or '未知'}`")
+                with st.container(border=True):
+                    st.markdown(paper['dialectical_analysis'])
+                
+                # 一键导出为 Markdown，调用浏览器原生保存路径选择窗口
+                st.download_button(
+                    label="📥 一键导出 Markdown 报告",
+                    data=paper['dialectical_analysis'],
+                    file_name=f"{paper['title']}_AI学术解构报告.md",
+                    mime="text/markdown",
+                    key=f"export_detail_{paper['paper_id']}",
+                    use_container_width=True
+                )
+            else:
+                st.warning("⏳ 暂无该论文的 AI 深度解构。")
+                brain_name = api_models[selected_brain_key].get("name", selected_brain_key)
+                if st.button(f"🤖 立即激活 {brain_name} 技术解构", key=f"detail_activate_{paper['paper_id']}", use_container_width=True):
+                    with st.spinner(f"正在使用 {brain_name} 深度剖析论文中..."):
+                        analysis_text = analyze_and_store_paper(paper['paper_id'], paper['pdf_path'], paper['title'], model_id=selected_brain_key)
+                        if analysis_text.startswith("❌"):
+                            st.error(analysis_text)
+                        else:
+                            st.rerun()
+        else:
+            # 没有任何选中的论文时的精美占位界面
+            with st.container(border=True):
+                st.markdown("<h3 style='text-align: center; color: #4B5563;'>🪐 个人学术大仓阅读器</h3>", unsafe_allow_html=True)
+                st.markdown("<p style='text-align: center; color: #6B7280;'>请在左侧列表中点选一篇论文，或在搜索栏中过滤目标文献！</p>", unsafe_allow_html=True)
+                st.info("💡 如果本地大仓空空如也，请在左侧侧边栏中选择研究方向并点击【🚀 触发雷达扫描】或【🔄 一键同步物理大仓并诊断】！")
 
 with tab_scheduler:
     st.subheader("⏰ 智能定时扫描与解构调度")
