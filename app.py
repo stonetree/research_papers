@@ -55,11 +55,9 @@ st.set_page_config(page_title="🪐 Infrastructure AI Radar Hub", layout="wide")
 # 注入 CSS 消除 Streamlit 默认的顶部巨大空白并隐藏空置头部栏，提供防裁切的响应式自适应布局
 st.markdown("""
     <style>
-        /* 隐藏 Streamlit 默认的顶部空置页眉栏，释放头部空间 */
-        header {
-            visibility: hidden;
-            height: 0px !important;
-            padding: 0px !important;
+        /* 仅将头部页眉背景设为透明，避免遮挡，同时确保最左侧的侧边栏收缩/展开控制按钮完美可见与正常操作 */
+        header[data-testid="stHeader"] {
+            background-color: transparent !important;
         }
         /* 动态温和地缩减主体容器顶部外边距，适应不同显示器分辨率与屏幕缩放 */
         .block-container {
