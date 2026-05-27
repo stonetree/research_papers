@@ -51,6 +51,26 @@ if "search_keyword" not in st.session_state:
     st.session_state["search_keyword"] = ""
 
 st.set_page_config(page_title="🪐 Infrastructure AI Radar Hub", layout="wide")
+
+# 注入 CSS 消除 Streamlit 默认的顶部巨大空白，将标题整体往顶部推，提升应用整体紧凑感与桌面客户端质感
+st.markdown("""
+    <style>
+        /* 极大缩减主体容器默认的顶部边距 */
+        .block-container {
+            padding-top: 1.5rem !important;
+            padding-bottom: 1.5rem !important;
+            padding-left: 2.5rem !important;
+            padding-right: 2.5rem !important;
+        }
+        /* 消除大标题自身的上边距 */
+        h1 {
+            margin-top: -1.2rem !important;
+            padding-top: 0rem !important;
+            margin-bottom: 1rem !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 st.title("🪐 AI 基础设施与软硬件协同 —— 个人智能论文知识库")
 
 # 侧边栏：控制平面触发器
