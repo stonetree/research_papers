@@ -52,21 +52,29 @@ if "search_keyword" not in st.session_state:
 
 st.set_page_config(page_title="🪐 Infrastructure AI Radar Hub", layout="wide")
 
-# 注入 CSS 消除 Streamlit 默认的顶部巨大空白，将标题整体往顶部推，提升应用整体紧凑感与桌面客户端质感
+# 注入 CSS 消除 Streamlit 默认的顶部巨大空白并隐藏空置头部栏，提供防裁切的响应式自适应布局
 st.markdown("""
     <style>
-        /* 极大缩减主体容器默认的顶部边距 */
-        .block-container {
-            padding-top: 1.5rem !important;
-            padding-bottom: 1.5rem !important;
-            padding-left: 2.5rem !important;
-            padding-right: 2.5rem !important;
+        /* 隐藏 Streamlit 默认的顶部空置页眉栏，释放头部空间 */
+        header {
+            visibility: hidden;
+            height: 0px !important;
+            padding: 0px !important;
         }
-        /* 消除大标题自身的上边距 */
+        /* 动态温和地缩减主体容器顶部外边距，适应不同显示器分辨率与屏幕缩放 */
+        .block-container {
+            padding-top: 2rem !important;
+            padding-bottom: 2rem !important;
+            padding-left: 2rem !important;
+            padding-right: 2rem !important;
+        }
+        /* 移除 h1 大标题的任何负外边距以完全防范文字裁切 */
         h1 {
-            margin-top: -1.2rem !important;
+            margin-top: 0rem !important;
             padding-top: 0rem !important;
             margin-bottom: 1rem !important;
+            font-size: calc(1.3rem + 0.8vw) !important; /* 使用响应式字号，根据设备分辨率和视口宽度自适应缩放 */
+            line-height: 1.2 !important;
         }
     </style>
 """, unsafe_allow_html=True)
