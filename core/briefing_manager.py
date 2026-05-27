@@ -88,7 +88,7 @@ def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
         }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        response = requests.post(url, json=payload, headers=headers, timeout=3600)
         response.raise_for_status()
         json_data = response.json()
         

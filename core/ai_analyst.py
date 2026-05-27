@@ -181,7 +181,7 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                         "Connection": "close"
-                    }, json=title_payload, timeout=30)
+                    }, json=title_payload, timeout=3600)
                     if t_response.status_code == 200:
                         t_json = t_response.json()
                         extracted_title = t_json["choices"][0]["message"]["content"].strip().replace('"', '').replace("'", "").replace("`", "")
@@ -217,7 +217,7 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
             
             for attempt in range(max_retries):
                 try:
-                    response = requests.post(api_url, headers=headers, json=payload, timeout=90)
+                    response = requests.post(api_url, headers=headers, json=payload, timeout=3600)
                     if response.status_code == 200:
                         break
                     else:
@@ -393,7 +393,7 @@ def arbitrate_papers(candidates, topic_name, model_id):
                 ],
                 "temperature": 0.1
             }
-            response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+            response = requests.post(api_url, headers=headers, json=payload, timeout=3600)
             if response.status_code == 200:
                 text = clean_json_string(response.json()["choices"][0]["message"]["content"])
                 return json.loads(text)
