@@ -295,7 +295,7 @@ def test_api_connection(model_id):
                 "messages": [
                     {"role": "user", "content": "Hello, connection check! Please reply exactly with 'OK' in 1 word."}
                 ],
-                "max_tokens": 10
+                "max_tokens": 2048
             }
             response = requests.post(api_url, headers=headers, json=payload, timeout=15)
             latency = time.time() - start_time
