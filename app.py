@@ -331,7 +331,7 @@ with tab_library:
                 st.info("💡 大仓空空如也，请在左侧触发雷达扫描或物理同步！")
         else:
             st.caption(f"📚 可视文献列表 (共 {len(papers_to_show)} 篇)：")
-            with st.container(height=720):
+            with st.container(height=760):
                 for p in papers_to_show:
                     p_id = p["paper_id"]
                     is_selected = (p_id == active_paper_id)
@@ -425,7 +425,7 @@ with tab_library:
                         st.markdown("<div style='text-align: center; padding-top: 6px; color: red; font-weight: bold; font-size: 0.9rem;'>🔴 PDF 丢失</div>", unsafe_allow_html=True)
             
             # 2. 独立滚动的正文容器 (Scrollable details container)
-            with st.container(height=580):
+            with st.container(height=700):
                 st.markdown(f"### 📘 《{paper['title']}》")
                 st.markdown("---")
                 
