@@ -344,76 +344,86 @@ with tab_library:
             conn.close()
             
         if paper:
-            # 顶部导航行：上一篇、下一篇、当前进度
+            # 1. 顶部持久化工具栏 (Fixed Toolbar at the top of the right pane)
             try:
                 curr_idx = paper_ids.index(active_paper_id)
             except ValueError:
                 curr_idx = -1
                 
-            if curr_idx != -1:
+            with st.container(border=True):
+                # 顶部导航行
                 nav_col1, nav_col2, nav_col3 = st.columns([1, 1, 2.5])
                 with nav_col1:
-                    prev_disabled = (curr_idx == 0)
-                    if st.button("⏮️ 上一篇论文", key="prev_paper_btn", use_container_width=True, disabled=prev_disabled):
+                    prev_disabled = (curr_idx <= 0)
+                    if st.button("⏮️ 上一篇", key="prev_paper_btn", use_container_width=True, disabled=prev_disabled):
                         st.session_state["active_view_paper_id"] = paper_ids[curr_idx - 1]
                         st.rerun()
                 with nav_col2:
-                    next_disabled = (curr_idx == len(paper_ids) - 1)
-                    if st.button("下一篇论文 ⏭️", key="next_paper_btn", use_container_width=True, disabled=next_disabled):
+                    next_disabled = (curr_idx == len(paper_ids) - 1 or curr_idx == -1)
+                    if st.button("下一篇 ⏭️", key="next_paper_btn", use_container_width=True, disabled=next_disabled):
                         st.session_state["active_view_paper_id"] = paper_ids[curr_idx + 1]
                         st.rerun()
                 with nav_col3:
-                    st.markdown(f"<div style='padding-top: 6px; font-size: 0.9rem; color: #666;'>📖 当前第 <b>{curr_idx + 1}/{len(paper_ids)}</b> 篇</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='padding-top: 6px; font-size: 0.9rem; color: #666; text-align: right;'>📖 进度: <b>{curr_idx + 1}/{len(paper_ids)}</b> 篇</div>", unsafe_allow_html=True)
+                
+                # 功能动作行
+                act_col1, act_col2 = st.columns([1.5, 1])
+                with act_col1:
+                    if paper['dialectical_analysis']:
+                        # 一键导出为 Markdown，调用浏览器原生保存路径选择窗口
+                        st.download_button(
+                            label="📥 一键导出 Markdown 报告",
+                            data=paper['dialectical_analysis'],
+                            file_name=f"{paper['title']}_AI学术解构报告.md",
+                            mime="text/markdown",
+                            key=f"export_detail_{paper['paper_id']}",
+                            use_container_width=True
+                        )
+                    else:
+                        brain_name = api_models[selected_brain_key].get("name", selected_brain_key)
+                        if st.button(f"🤖 激活 {brain_name} 解构", key=f"detail_activate_{paper['paper_id']}", use_container_width=True, type="primary"):
+                            with st.spinner(f"正在深度剖析..."):
+                                analysis_text = analyze_and_store_paper(paper['paper_id'], paper['pdf_path'], paper['title'], model_id=selected_brain_key)
+                                if analysis_text.startswith("❌"):
+                                    st.error(analysis_text)
+                                else:
+                                    st.rerun()
+                with act_col2:
+                    # PDF 本地关联校验状态小微标
+                    resolved_pdf = resolve_pdf_path(paper['pdf_path']) if paper['pdf_path'] else ""
+                    if resolved_pdf and os.path.exists(resolved_pdf):
+                        st.markdown("<div style='text-align: center; padding-top: 6px; color: green; font-weight: bold; font-size: 0.9rem;'>🟢 PDF 已关联</div>", unsafe_allow_html=True)
+                    else:
+                        st.markdown("<div style='text-align: center; padding-top: 6px; color: red; font-weight: bold; font-size: 0.9rem;'>🔴 PDF 丢失</div>", unsafe_allow_html=True)
             
-            st.markdown(f"### 📘 《{paper['title']}》")
-            st.markdown("---")
-            
-            # 双栏或展开折叠卡展示基础元数据
-            with st.expander("📋 论文基础元数据与物理 PDF 关联状态", expanded=True):
+            # 2. 独立滚动的正文容器 (Scrollable details container)
+            with st.container(height=580):
+                st.markdown(f"### 📘 《{paper['title']}》")
+                st.markdown("---")
+                
+                # 论文基础元数据
+                st.markdown("##### 📋 论文元数据")
                 meta_c1, meta_c2 = st.columns([1, 1])
                 with meta_c1:
                     st.markdown(f"**🏷️ 顶会/期刊**: `{paper['venue'] or '顶会/未标注'}`")
                     st.markdown(f"**📅 发表年份**: `{paper['year'] or '未知'}`")
+                with meta_c2:
                     st.markdown(f"**📈 引用频次**: `{paper['citations'] or 0}` 次")
                     st.markdown(f"**👥 作者团队**: {paper['authors'] or '未知'}")
-                with meta_c2:
-                    st.markdown(f"**📝 物理文件**: `{os.path.basename(paper['pdf_path']) if paper['pdf_path'] else '未关联'}`")
-                    resolved_pdf = resolve_pdf_path(paper['pdf_path']) if paper['pdf_path'] else ""
-                    if resolved_pdf and os.path.exists(resolved_pdf):
-                        st.success("💾 本地 PDF 文件已安全关联")
-                    else:
-                        st.error("❌ 本地物理文件缺失")
+                
+                st.markdown(f"**📝 物理文件**: `{os.path.basename(paper['pdf_path']) if paper['pdf_path'] else '未关联'}`")
                 st.markdown("**Abstract (摘要)**:")
                 st.info(paper['abstract'] or "暂无摘要描述。")
                 
-            st.markdown("---")
-            
-            # 展示 AI 辩证报告
-            st.subheader("💡 首席科学家 AI 辩证剖析报告")
-            if paper['dialectical_analysis']:
-                st.caption(f"🧠 驱动智能大脑: `{paper['model_name'] or '未知'}`")
-                with st.container(border=True):
-                    st.markdown(paper['dialectical_analysis'])
+                st.markdown("---")
                 
-                # 一键导出为 Markdown，调用浏览器原生保存路径选择窗口
-                st.download_button(
-                    label="📥 一键导出 Markdown 报告",
-                    data=paper['dialectical_analysis'],
-                    file_name=f"{paper['title']}_AI学术解构报告.md",
-                    mime="text/markdown",
-                    key=f"export_detail_{paper['paper_id']}",
-                    use_container_width=True
-                )
-            else:
-                st.warning("⏳ 暂无该论文的 AI 深度解构。")
-                brain_name = api_models[selected_brain_key].get("name", selected_brain_key)
-                if st.button(f"🤖 立即激活 {brain_name} 技术解构", key=f"detail_activate_{paper['paper_id']}", use_container_width=True):
-                    with st.spinner(f"正在使用 {brain_name} 深度剖析论文中..."):
-                        analysis_text = analyze_and_store_paper(paper['paper_id'], paper['pdf_path'], paper['title'], model_id=selected_brain_key)
-                        if analysis_text.startswith("❌"):
-                            st.error(analysis_text)
-                        else:
-                            st.rerun()
+                # 展示 AI 辩证报告
+                st.markdown("##### 💡 首席科学家 AI 辩证剖析报告")
+                if paper['dialectical_analysis']:
+                    st.caption(f"🧠 驱动智能大脑: `{paper['model_name'] or '未知'}`")
+                    st.markdown(paper['dialectical_analysis'])
+                else:
+                    st.warning("⏳ 暂无该论文的 AI 深度解构。")
         else:
             # 没有任何选中的论文时的精美占位界面
             with st.container(border=True):
