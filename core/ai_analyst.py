@@ -20,10 +20,22 @@ def extract_text_from_pdf(pdf_path):
         return ""
 
 def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
-    from .database import resolve_pdf_path
+    from .database import resolve_pdf_path, get_db_connection
     pdf_path = resolve_pdf_path(pdf_path)
     if not os.path.exists(pdf_path):
         return "❌ 本地物理 PDF 文件丢失。"
+        
+    # 查询当前文献是否是手动导入的
+    is_manual = False
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT source_engine FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
+        if row and row["source_engine"] == "manual":
+            is_manual = True
+    except Exception as e:
+        print(f"查询 source_engine 异常: {e}")
+    finally:
+        conn.close()
         
     # 从配置文件中获取对应的模型配置
     cfg = get_model_config(model_id)
@@ -101,6 +113,24 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                 import time; time.sleep(2)
                 uploaded_file = client.files.get(name=uploaded_file.name)
                 
+            # 如果是手动添加的文献，先通过 Gemini 提炼出真实论文标题并更新数据库关联
+            if is_manual:
+                try:
+                    title_response = client.models.generate_content(
+                        model=model_name,
+                        contents=[uploaded_file, "请直接给出这篇论文的官方英文或中文真实标题，不需要任何其他解释、前缀、双引号或标点。只返回标题本身即可。"],
+                        config=types.GenerateContentConfig(temperature=0.0)
+                    )
+                    extracted_title = title_response.text.strip().replace('"', '').replace("'", "").replace("`", "")
+                    if extracted_title and len(extracted_title) > 3 and not extracted_title.startswith("❌"):
+                        conn = get_db_connection()
+                        conn.execute("UPDATE papers SET title = ? WHERE paper_id = ?", (extracted_title, paper_id))
+                        conn.commit()
+                        conn.close()
+                        print(f"✅ 成功提取并关联论文真实标题: {extracted_title}")
+                except Exception as e:
+                    print(f"⚠️ 提取论文真实标题失败: {e}")
+
             response = client.models.generate_content(
                 model=model_name,
                 contents=[uploaded_file, f"请全面解构此论文: {title}"],
@@ -135,6 +165,34 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
             max_char_limit = 60000
             if len(paper_text) > max_char_limit:
                 paper_text = paper_text[:max_char_limit] + "\n\n[...部分过长附录/参考文献文本已由系统安全截断以提升传输稳定性...]"
+
+            # 如果是手动添加的文献，先通过 OpenAI/DeepSeek 接口提炼出真实论文标题并更新数据库关联
+            if is_manual:
+                try:
+                    title_payload = {
+                        "model": model_name,
+                        "messages": [
+                            {"role": "system", "content": "你是一个学术助手。请从给出的论文文本片段中提取出这篇论文的官方真实标题。只返回标题本身，不要有任何多余的解释、前缀、双引号或标点。"},
+                            {"role": "user", "content": f"提取以下论文开头的标题：\n\n{paper_text[:3000]}"}
+                        ],
+                        "temperature": 0.0
+                    }
+                    t_response = requests.post(api_url, headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "Connection": "close"
+                    }, json=title_payload, timeout=30)
+                    if t_response.status_code == 200:
+                        t_json = t_response.json()
+                        extracted_title = t_json["choices"][0]["message"]["content"].strip().replace('"', '').replace("'", "").replace("`", "")
+                        if extracted_title and len(extracted_title) > 3:
+                            conn = get_db_connection()
+                            conn.execute("UPDATE papers SET title = ? WHERE paper_id = ?", (extracted_title, paper_id))
+                            conn.commit()
+                            conn.close()
+                            print(f"✅ 成功提取并关联论文真实标题: {extracted_title}")
+                except Exception as e:
+                    print(f"⚠️ 提取论文真实标题失败: {e}")
 
             headers = {
                 "Authorization": f"Bearer {api_key}",
