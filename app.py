@@ -213,6 +213,51 @@ if st.session_state.get("unanalyzed_papers"):
     papers_to_process = st.session_state["unanalyzed_papers"]
     papers_to_process = papers_to_process[:max_batch]
     total_papers = len(papers_to_process)
+    
+    st.sidebar.markdown(f"**⚡ 未解构文献快捷补全 (本批次上限: {max_batch} 篇)：**")
+    if st.sidebar.button(
+        f"🤖 一键并发补全 {total_papers} 篇",
+        help="利用多线程线程池，并发调用当前设置的首席科学家 AI 大脑，为物理大仓中所有未解析的 PDF 论文批量补全生成学术全景辩证解构报告。"
+    ):
+        progress_bar = st.sidebar.progress(0.0)
+        has_any_error = False
+        
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        status_text = st.sidebar.empty()
+        error_container = st.sidebar.empty()
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(analyze_and_store_paper, paper["paper_id"], paper["pdf_path"], paper["title"], model_id=selected_brain_key): paper
+                for paper in papers_to_process
+            }
+            
+            for idx, future in enumerate(as_completed(futures)):
+                paper = futures[future]
+                brain_name = api_models[selected_brain_key].get("name", selected_brain_key)
+                status_text.caption(f"[{idx+1}/{total_papers}] 并发完成: {paper['title'][:15]}...")
+                
+                try:
+                    res = future.result()
+                    if res.startswith("❌"):
+                        error_container.error(f"❌ 《{paper['title'][:10]}》剖析失败: {res}")
+                        has_any_error = True
+                except Exception as e:
+                    error_container.error(f"❌ 《{paper['title'][:10]}》触发异常: {e}")
+                    has_any_error = True
+                    
+                progress_bar.progress((idx + 1) / total_papers)
+                
+        if not has_any_error:
+            st.sidebar.success("🎉 一键并发剖析成功！所有缺失报告已补齐！")
+            st.session_state["unanalyzed_papers"] = []
+            st.rerun()
+
+
+# 主界面：四重选项卡分流
+tab_library, tab_scheduler, tab_briefings, tab_global_config = st.tabs(["📂 本地沉淀文献大仓", "⏰ 智能定时扫描与解构调度", "🌐 AI 24h雷达与技术洞察", "⚙️ 全局系统配置"])
+
 with tab_library:
     # 0. 全局数据装载与检索过滤 (位于最顶层以保持结构规整与数据一致)
     search_keyword = st.text_input(
