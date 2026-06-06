@@ -6,6 +6,75 @@ import requests
 from .database import save_ai_summary
 from .config_loader import get_model_config, get_global_settings
 
+def make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, max_tokens=None, timeout=3600):
+    is_responses_api = "/responses" in api_url
+    
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Connection": "close"
+    }
+    
+    if is_responses_api:
+        payload = {
+            "model": model_name,
+            "input": messages,
+            "tools": [{"type": "web_search"}]
+        }
+    else:
+        payload = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": temperature
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+            
+    response = requests.post(api_url, headers=headers, json=payload, timeout=timeout)
+    return response
+
+def parse_llm_response(response, is_responses_api):
+    if response.status_code != 200:
+        return None, f"HTTP {response.status_code}: {response.text}"
+    
+    try:
+        res_json = response.json()
+        if is_responses_api:
+            content_text = ""
+            for block in res_json.get("output", []):
+                if block.get("type") == "message" and "content" in block:
+                    for item in block.get("content", []):
+                        if item.get("type") == "output_text" and "text" in item:
+                            content_text += item["text"]
+                        elif "text" in item:
+                            content_text += item["text"]
+            if content_text:
+                return content_text, None
+            # fallback
+            for block in res_json.get("output", []):
+                if "content" in block:
+                    for item in block.get("content", []):
+                        if "text" in item:
+                            return item["text"], None
+            return None, f"在响应数据中未找到 message 文本。原始响应: {response.text}"
+        else:
+            # chat completions structure: res_json["choices"][0]["message"]["content"]
+            content = res_json["choices"][0]["message"]["content"]
+            return content, None
+    except Exception as e:
+        return None, f"解析响应 JSON 失败: {e}. 原始响应: {response.text}"
+
+
+def clean_json_string(text):
+    text = text.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 3:
+            text = parts[1]
+            if text.startswith("json"):
+                text = text[4:]
+    return text.strip()
+
 def extract_text_from_pdf(pdf_path):
     """从 PDF 文件中提取文本（适用于非原生多模态大语言模型，如 DeepSeek）"""
     try:
@@ -169,22 +238,14 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
             # 如果是手动添加的文献，先通过 OpenAI/DeepSeek 接口提炼出真实论文标题并更新数据库关联
             if is_manual:
                 try:
-                    title_payload = {
-                        "model": model_name,
-                        "messages": [
-                            {"role": "system", "content": "你是一个学术助手。请从给出的论文文本片段中提取出这篇论文的官方真实标题。只返回标题本身，不要有任何多余的解释、前缀、双引号或标点。"},
-                            {"role": "user", "content": f"提取以下论文开头的标题：\n\n{paper_text[:3000]}"}
-                        ],
-                        "temperature": 0.0
-                    }
-                    t_response = requests.post(api_url, headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                        "Connection": "close"
-                    }, json=title_payload, timeout=3600)
-                    if t_response.status_code == 200:
-                        t_json = t_response.json()
-                        extracted_title = t_json["choices"][0]["message"]["content"].strip().replace('"', '').replace("'", "").replace("`", "")
+                    title_messages = [
+                        {"role": "system", "content": "你是一个学术助手。请从给出的论文文本片段中提取出这篇论文的官方真实标题。只返回标题本身，不要有任何多余的解释、前缀、双引号或标点。"},
+                        {"role": "user", "content": f"提取以下论文开头的标题：\n\n{paper_text[:3000]}"}
+                    ]
+                    t_response = make_llm_request(api_url, api_key, model_name, title_messages, temperature=0.0, timeout=3600)
+                    content, err = parse_llm_response(t_response, "/responses" in api_url)
+                    if not err and content:
+                        extracted_title = content.strip().replace('"', '').replace("'", "").replace("`", "")
                         if extracted_title and len(extracted_title) > 3:
                             conn = get_db_connection()
                             conn.execute("UPDATE papers SET title = ? WHERE paper_id = ?", (extracted_title, paper_id))
@@ -194,50 +255,43 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                 except Exception as e:
                     print(f"⚠️ 提取论文真实标题失败: {e}")
 
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Connection": "close"
-            }
-            
-            payload = {
-                "model": model_name,
-                "messages": [
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": f"以下是学术论文《{title}》的完整文本内容，请全面进行辩证客观解构：\n\n{paper_text}"}
-                ],
-                "temperature": 0.1
-            }
+            messages = [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": f"以下是学术论文《{title}》的完整文本内容，请全面进行辩证客观解构：\n\n{paper_text}"}
+            ]
             
             # 带指数退避的鲁棒性重试机制，抗 SSL 抖动
             import time
             max_retries = 3
             response = None
             last_err = None
+            is_responses_api = "/responses" in api_url
             
             for attempt in range(max_retries):
                 try:
-                    response = requests.post(api_url, headers=headers, json=payload, timeout=3600)
+                    response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600)
                     if response.status_code == 200:
                         break
                     else:
-                        print(f"⚠️ DeepSeek 请求尝试 {attempt+1} 失败 (HTTP {response.status_code})")
+                        print(f"⚠️ LLM 请求尝试 {attempt+1} 失败 (HTTP {response.status_code})")
                 except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
                     last_err = e
-                    print(f"⚠️ DeepSeek 请求尝试 {attempt+1} 触发网络/SSL抖动: {e}")
+                    print(f"⚠️ LLM 请求尝试 {attempt+1} 触发网络/SSL抖动: {e}")
                     if attempt < max_retries - 1:
                         time.sleep(2 * (attempt + 1))  # 指数退避退缩
                 except Exception as e:
                     last_err = e
-                    print(f"⚠️ DeepSeek 请求尝试 {attempt+1} 触发未知异常: {e}")
+                    print(f"⚠️ LLM 请求尝试 {attempt+1} 触发未知异常: {e}")
                     if attempt < max_retries - 1:
                         time.sleep(1)
 
             if response is not None and response.status_code == 200:
-                result_json = response.json()
-                analysis_text = result_json["choices"][0]["message"]["content"]
-                save_ai_summary(paper_id, f"{display_name} ({model_name})", analysis_text)
-                return analysis_text
+                content, err = parse_llm_response(response, is_responses_api)
+                if not err and content:
+                    save_ai_summary(paper_id, f"{display_name} ({model_name})", content)
+                    return content
+                else:
+                    return f"❌ 解析响应失败: {err}"
             elif response is not None:
                 return f"❌ API 请求失败 (HTTP {response.status_code}): {response.text}"
             else:
@@ -285,24 +339,19 @@ def test_api_connection(model_id):
             return False, "未配置 API URL (对于 OpenAI 兼容提供商必填)。", 0
             
         try:
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Connection": "close"
-            }
-            payload = {
-                "model": model_name,
-                "messages": [
-                    {"role": "user", "content": "Hello, connection check! Please reply exactly with 'OK' in 1 word."}
-                ],
-                "max_tokens": 2048
-            }
-            response = requests.post(api_url, headers=headers, json=payload, timeout=15)
+            messages = [
+                {"role": "user", "content": "Hello, connection check! Please reply exactly with 'OK' in 1 word."}
+            ]
+            is_responses_api = "/responses" in api_url
+            response = make_llm_request(api_url, api_key, model_name, messages, max_tokens=2048, timeout=15)
             latency = time.time() - start_time
             if response.status_code == 200:
-                result_json = response.json()
-                reply = result_json["choices"][0]["message"]["content"].strip()
-                return True, f"连通成功！模型响应: '{reply}'", round(latency, 2)
+                content, err = parse_llm_response(response, is_responses_api)
+                if not err and content:
+                    reply = content.strip()
+                    return True, f"连通成功！模型响应: '{reply}'", round(latency, 2)
+                else:
+                    return False, f"解析响应错误: {err}", 0
             else:
                 return False, f"API 响应错误 (HTTP {response.status_code}): {response.text}", 0
         except Exception as e:
@@ -349,15 +398,6 @@ def arbitrate_papers(candidates, topic_name, model_id):
         "请严格进行语义过滤，仅返回与主题高度相关的论文 ID 的 JSON 数组。"
     )
 
-    def clean_json_string(text):
-        text = text.strip()
-        if text.startswith("```"):
-            parts = text.split("```")
-            if len(parts) >= 3:
-                text = parts[1]
-                if text.startswith("json"):
-                    text = text[4:]
-        return text.strip()
 
     if provider == "gemini":
         try:
@@ -380,23 +420,20 @@ def arbitrate_papers(candidates, topic_name, model_id):
         if not api_url:
             return []
         try:
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Connection": "close"
-            }
-            payload = {
-                "model": model_name,
-                "messages": [
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "temperature": 0.1
-            }
-            response = requests.post(api_url, headers=headers, json=payload, timeout=3600)
+            messages = [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_prompt}
+            ]
+            is_responses_api = "/responses" in api_url
+            response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600)
             if response.status_code == 200:
-                text = clean_json_string(response.json()["choices"][0]["message"]["content"])
-                return json.loads(text)
+                content, err = parse_llm_response(response, is_responses_api)
+                if not err and content:
+                    text = clean_json_string(content)
+                    return json.loads(text)
+                else:
+                    print(f"❌ 解析仲裁响应失败: {err}")
+                    return []
             else:
                 print(f"❌ DeepSeek 仲裁失败 (HTTP {response.status_code}): {response.text}")
                 return []
@@ -405,3 +442,60 @@ def arbitrate_papers(candidates, topic_name, model_id):
             return []
             
     return []
+
+def model_web_search(query_string, model_id):
+    """通过大模型的联网搜索工具直接查找论文，返回 (success, papers_list)"""
+    cfg = get_model_config(model_id)
+    if not cfg:
+        return False, f"未在 API 配置文件中找到模型标识为 '{model_id}' 的配置。"
+        
+    provider = cfg.get("provider", "openai_compatible")
+    model_name = cfg.get("model", model_id)
+    api_key = cfg.get("resolved_api_key", "").strip()
+    api_url = cfg.get("url", "").strip()
+    
+    if not api_key:
+        return False, "未配置 API Key。"
+        
+    if not api_url:
+        return False, "未配置 API URL。"
+        
+    system_instruction = (
+        "你是一个极其严谨的 AI 首席科学家与顶尖科研检索专家。\n"
+        "请联网检索关于用户指定主题的最新、最核心、高质量的学术论文（如来自于 OSDI, SOSP, ASPLOS, ISCA, VLDB, arXiv 等）。\n"
+        "请必须返回 5-8 篇最相关的论文，且必须仅以一个标准的 JSON 数组格式输出，不要包含任何额外的解释性文字、前缀或后缀。\n"
+        "JSON 数组中的每个对象必须包含以下字段：\n"
+        "1. \"title\": 论文标题\n"
+        "2. \"authors\": 作者团队\n"
+        "3. \"year_venue\": 发表年份与会议/期刊名称 (例如 'ASPLOS 2025' 或 'arXiv 2026')\n"
+        "4. \"summary\": 核心技术创新点与贡献简述\n"
+        "5. \"url\": 论文的 PDF 下载链接或官方访问链接 (尽可能提供 direct PDF 链接)\n"
+        "不要返回其他任何非 JSON 的文本！直接返回一个标准的 JSON 数组。"
+    )
+    
+    messages = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": f"请联网检索最新、高质量的学术文献，技术主题是：{query_string}"}
+    ]
+    
+    try:
+        response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600)
+        if response.status_code == 200:
+            content, err = parse_llm_response(response, "/responses" in api_url)
+            if not err and content:
+                import json
+                cleaned = clean_json_string(content)
+                try:
+                    papers_list = json.loads(cleaned)
+                    if isinstance(papers_list, list):
+                        return True, papers_list
+                    else:
+                        return False, f"模型未返回一个列表。原始文本: {content}"
+                except Exception as je:
+                    return False, f"解析 JSON 列表失败: {je}. 原始文本: {content}"
+            else:
+                return False, f"解析模型响应失败: {err}"
+        else:
+            return False, f"API 请求失败 (HTTP {response.status_code}): {response.text}"
+    except Exception as e:
+        return False, f"模型检索过程中发生异常: {e}"

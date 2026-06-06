@@ -40,6 +40,15 @@ def init_db():
             FOREIGN KEY (paper_id) REFERENCES papers (paper_id)
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS search_archives (
+            archive_id TEXT PRIMARY KEY,
+            query TEXT NOT NULL,
+            results_json TEXT NOT NULL,
+            archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -90,3 +99,32 @@ def resolve_pdf_path(db_path):
         return local_path
         
     return db_path
+
+def insert_search_archive(archive_id, query, results_json):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO search_archives (archive_id, query, results_json)
+            VALUES (?, ?, ?)
+        ''', (archive_id, query, results_json))
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_search_archives():
+    conn = get_db_connection()
+    try:
+        rows = conn.execute('SELECT * FROM search_archives ORDER BY archived_at DESC').fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+def delete_search_archive(archive_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('DELETE FROM search_archives WHERE archive_id = ?', (archive_id,))
+        conn.commit()
+    finally:
+        conn.close()
