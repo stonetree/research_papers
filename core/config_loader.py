@@ -22,10 +22,10 @@ def load_raw_config():
                 "api_key_env": "DEEPSEEK_API_KEY",
                 "url": "https://api.deepseek.com/chat/completions"
             },
-            "gemini-3.5-flash": {
-                "name": "Gemini 3.5 Flash (最新多模态极速)",
+            "gemini-2.5-flash": {
+                "name": "Gemini 2.5 Flash (最新多模态极速)",
                 "provider": "gemini",
-                "model": "gemini-3.5-flash",
+                "model": "gemini-2.5-flash",
                 "api_key": "",
                 "api_key_env": "GEMINI_API_KEY",
                 "url": ""

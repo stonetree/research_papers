@@ -123,10 +123,10 @@ pip install streamlit requests pypdf google-genai arxiv
         "max_papers_per_batch": 1,                 // 单次批量补全的最大论文并发数
         "analysis_granularity": "detailed"         // 剖析精细度：'summary' (概要) 或 'detailed' (完整)
     },
-    "gemini-3.5-flash": {                          // 模型唯一标识 ID (Key)
-        "name": "Gemini 3.5 Flash (最新多模态极速)", // 前端界面展示的显示友好名称
+    "gemini-2.5-flash": {                          // 模型唯一标识 ID (Key)
+        "name": "Gemini 2.5 Flash (最新多模态极速)", // 前端界面展示的显示友好名称
         "provider": "gemini",                      // API 驱动类型：'gemini' 或 'openai_compatible'
-        "model": "gemini-3.5-flash",               // 对应的官方 API 接口实际调用模型名
+        "model": "gemini-2.5-flash",               // 对应的官方 API 接口实际调用模型名
         "api_key": "",                             // [敏感] 您的 API 密钥。若留空，系统会自动读取对应的环境变量
         "api_key_env": "GEMINI_API_KEY",           // API 密钥对应的系统环境变量备用键名
         "url": ""                                  // 接口 Endpoint URL (Gemini 类型留空即可，OpenAI 兼容类型必填)
@@ -156,7 +156,7 @@ pip install streamlit requests pypdf google-genai arxiv
 ```json
 {
     "gemini_api_key": "",                     // 专属 Gemini API 密钥。若留空，系统会自动读取系统全局环境变量 GEMINI_API_KEY
-    "model_name": "gemini-3.5-flash",         // 联网简报专用分析大脑，支持："gemini-2.5-flash" 或 "gemini-3.5-flash"
+    "model_name": "gemini-2.5-flash",         // 联网简报专用分析大脑，支持："gemini-2.5-flash" 或 "gemini-2.5-pro"
     "daily_briefing_time": "09:00",           // 每日 AI 进展简报的自动抓取运行时间点 (格式 HH:MM)
     "weekly_insight_time": "10:00",           // 每周 AI 技术深入洞察的自动抓取运行时间点 (格式 HH:MM)
     "weekly_insight_day": "Monday",           // 每周 AI 洞察在每周的星期几触发 (支持 "Monday", "Tuesday" 等英文全称)
