@@ -75,6 +75,58 @@ if "active_view_paper_id" not in st.session_state:
 if "search_keyword" not in st.session_state:
     st.session_state["search_keyword"] = ""
 
+# 初始化后台数据库状态变化监测器 (在学术雷达或后台定时扫描抓取到新文献或 AI 报告解析完成时，自动触发当前 UI 页面的热重载刷新)
+if "db_monitor_started" not in st.session_state:
+    st.session_state["db_monitor_started"] = True
+    
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+    from streamlit.runtime import get_instance as get_runtime_instance
+    
+    ctx = get_script_run_ctx()
+    if ctx:
+        session_id = ctx.session_id
+        
+        def monitor_db_changes():
+            from core.database import get_db_connection
+            def get_db_state():
+                conn = get_db_connection()
+                try:
+                    papers = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+                    summaries = conn.execute("SELECT COUNT(*) FROM ai_summaries WHERE dialectical_analysis IS NOT NULL").fetchone()[0]
+                    return papers, summaries
+                except Exception:
+                    return 0, 0
+                finally:
+                    conn.close()
+            
+            last_papers, last_summaries = get_db_state()
+            
+            while True:
+                time.sleep(3)  # 每 3 秒轮询一次数据库状态
+                
+                # 检查 Streamlit runtime 实例及当前会话是否依然活跃，如果不活跃（如关闭了页面）则安全退出线程
+                try:
+                    rt = get_runtime_instance()
+                    if not rt or not rt.is_active_session(session_id):
+                        break
+                except Exception:
+                    break
+                    
+                current_papers, current_summaries = get_db_state()
+                if current_papers != last_papers or current_summaries != last_summaries:
+                    last_papers, last_summaries = current_papers, current_summaries
+                    # 触发当前 session 的原生重绘刷新
+                    try:
+                        session_info = rt._session_mgr.get_active_session_info(session_id)
+                        if session_info and session_info.session:
+                            session_info.session.request_rerun(None)
+                    except Exception as e:
+                        print(f"⏰ [自动刷新异常] 无法触发 UI 刷新: {e}")
+                        
+        t = threading.Thread(target=monitor_db_changes, daemon=True)
+        t.start()
+        print(f"⏰ [UI监控激活] 已针对会话 {session_id} 启动后台数据库变化自适应刷新监控器。")
+
 st.set_page_config(page_title="🪐 Infrastructure AI Radar Hub", layout="wide")
 
 # 注入 CSS 消除 Streamlit 默认的顶部巨大空白并隐藏空置头部栏，提供防裁切的响应式自适应布局

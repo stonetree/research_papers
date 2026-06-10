@@ -13,6 +13,7 @@ TARGET_VENUES = ["ASPLOS", "OSDI", "SOSP", "ISCA", "MICRO", "VLDB", "arXiv"]
 
 def fetch_semantic_scholar_candidates(query_string, limit=15):
     """阶段 1 初审宽进：只抓取 Semantic Scholar 元数据，绝对不下载物理文件"""
+    print(f"🔍 [Semantic Scholar] 开始线上检索. 关键词: '{query_string}', 请求上限: {limit}")
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {
         "query": query_string,
@@ -27,23 +28,33 @@ def fetch_semantic_scholar_candidates(query_string, limit=15):
     try:
         response = requests.get(url, params=params, timeout=10, headers={"Connection": "close"})
         if response.status_code != 200:
-            print(f"⚠️ [Scholar Funnel Fetch 失败] HTTP {response.status_code}: {response.text}")
+            print(f"⚠️ [Semantic Scholar] 检索失败! HTTP {response.status_code}: {response.text}")
             return []
             
         papers = response.json().get("data", [])
+        print(f"🔍 [Semantic Scholar] 检索完成. API 返回 {len(papers)} 篇候选文献，开始进行过滤去重...")
+        
+        skipped_count = 0
+        venue_filtered_count = 0
+        no_pdf_count = 0
+        
         for p in papers:
             paper_id = p.get("paperId")
             if not paper_id or not p.get("openAccessPdf"):
+                no_pdf_count += 1
                 continue
                 
             venue = p.get("venue", "")
             is_target_venue = any(tv.lower() in venue.lower() for tv in TARGET_VENUES) if venue else True
             if not is_target_venue:
+                venue_filtered_count += 1
                 continue
                 
             # 去重校验：如果数据库里已有该论文，则跳过
             cursor.execute("SELECT 1 FROM papers WHERE paper_id = ?", (paper_id,))
             if cursor.fetchone():
+                skipped_count += 1
+                print(f"⏭️ [Semantic Scholar] 文献已存在于大仓，跳过: 《{p.get('title', '')[:30]}...》({paper_id})")
                 continue
                 
             authors_str = ", ".join([a['name'] for a in p.get('authors', [])])
@@ -60,8 +71,10 @@ def fetch_semantic_scholar_candidates(query_string, limit=15):
             })
             if len(candidates) >= limit:
                 break
+                
+        print(f"✅ [Semantic Scholar] 检索过滤完成. 筛选出 {len(candidates)} 篇全新候选人 (无PDF/无ID跳过: {no_pdf_count} 篇, 门槛期刊过滤: {venue_filtered_count} 篇, 本地大仓去重: {skipped_count} 篇)")
     except Exception as e:
-        print(f"⚠️ [Scholar Funnel Fetch 异常]: {e}")
+        print(f"⚠️ [Semantic Scholar] 检索过程发生异常: {e}")
     finally:
         conn.close()
         
@@ -69,6 +82,7 @@ def fetch_semantic_scholar_candidates(query_string, limit=15):
 
 def fetch_arxiv_candidates(query_string, limit=15):
     """阶段 1 初审宽进：只抓取 ArXiv 元数据，绝对不下载物理文件"""
+    print(f"🔍 [arXiv] 开始线上检索. 关键词: '{query_string}', 请求上限: {limit}")
     search = arxiv.Search(
         query=query_string,
         max_results=limit * 2,
@@ -82,15 +96,24 @@ def fetch_arxiv_candidates(query_string, limit=15):
     
     try:
         client = arxiv.Client()
-        for result in client.results(search):
+        results = list(client.results(search))
+        print(f"🔍 [arXiv] 检索完成. API 返回 {len(results)} 篇候选文献，开始进行过滤去重...")
+        
+        skipped_count = 0
+        no_pdf_count = 0
+        
+        for result in results:
             paper_id = result.entry_id.split("/abs/")[-1].split("v")[0]
             
             cursor.execute("SELECT 1 FROM papers WHERE paper_id = ?", (paper_id,))
             if cursor.fetchone():
+                skipped_count += 1
+                print(f"⏭️ [arXiv] 文献已存在于大仓，跳过: 《{result.title[:30]}...》({paper_id})")
                 continue
                 
             pdf_url = result.pdf_url
             if not pdf_url:
+                no_pdf_count += 1
                 continue
                 
             authors_str = ", ".join([a.name for a in result.authors])
@@ -107,8 +130,10 @@ def fetch_arxiv_candidates(query_string, limit=15):
             })
             if len(candidates) >= limit:
                 break
+                
+        print(f"✅ [arXiv] 检索过滤完成. 筛选出 {len(candidates)} 篇全新候选人 (无PDF跳过: {no_pdf_count} 篇, 本地大仓去重: {skipped_count} 篇)")
     except Exception as e:
-        print(f"⚠️ [ArXiv Funnel Fetch 异常]: {e}")
+        print(f"⚠️ [arXiv] 检索过程发生异常: {e}")
     finally:
         conn.close()
         
@@ -133,6 +158,7 @@ def execute_two_stage_funnel_search(topic_name, query_string, target_limit, mode
         source_engine = "arXiv"
         
     if not candidates:
+        print(f"📭 [宽进漏斗] 没有捕获到任何全新的候选文献（全部被本地大仓去重拦截）。检索结束。")
         return [], "多源宽进管道未捕获任何全新论文（已被本地历史完美拦截）。"
         
     print(f"🧠 [漏斗阶段 2：闪电初审] 成功捕获 {len(candidates)} 篇候选文献，启动 AI 首席科学家语义仲裁...")
@@ -194,9 +220,11 @@ def execute_two_stage_funnel_search(topic_name, query_string, target_limit, mode
                 # 入库 papers
                 insert_paper(paper_data)
                 new_papers.append(paper_data)
+                print(f"✅ [精准下载成功] 物理落盘入库成功: 《{p['title']}》")
             else:
                 print(f"❌ [精确下载失败] HTTP {res.status_code}: {p['title']}")
         except Exception as e:
             print(f"❌ [精准下载异常] 《{p['title']}》下载物理文件时出错: {e}")
             
+    print(f"🏁 [漏斗管道结束] 成功完成 {len(new_papers)} 篇黄金文献的收割入库。")
     return new_papers, source_engine
