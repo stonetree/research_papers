@@ -77,21 +77,32 @@ def clean_json_string(text):
 
 def extract_text_from_pdf(pdf_path):
     """从 PDF 文件中提取文本（适用于非原生多模态大语言模型，如 DeepSeek）"""
+    print(f"📄 [PDF 文本提取] 开始读取本地 PDF 物理文件: {pdf_path}")
     try:
         import pypdf
         reader = pypdf.PdfReader(pdf_path)
         text = ""
-        for page in reader.pages:
-            text += page.extract_text() or ""
+        total_pages = len(reader.pages)
+        print(f"📄 [PDF 文本提取] 检测到 PDF 共 {total_pages} 页。正在逐页提取文本...")
+        for i, page in enumerate(reader.pages):
+            page_text = page.extract_text() or ""
+            text += page_text
+            if (i + 1) % 5 == 0 or (i + 1) == total_pages:
+                print(f"⏳ [PDF 文本提取] 已成功处理并提取 {i+1}/{total_pages} 页...")
+        print(f"📄 [PDF 文本提取完成] 成功读取所有页面，共提取 {len(text)} 字符。")
         return text
     except Exception as e:
-        print(f"提取 PDF 文本失败: {e}")
+        print(f"❌ [PDF 文本提取失败] 读取/解析 PDF 发生异常: {e}")
         return ""
 
 def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
     from .database import resolve_pdf_path, get_db_connection
     pdf_path = resolve_pdf_path(pdf_path)
+    print(f"📂 [分析准备] 开始对论文《{title}》(ID: {paper_id}) 发起 AI 大脑分析...")
+    print(f"📁 [PDF 路径解析] 物理 PDF 路径已解析为: {pdf_path}")
     if not os.path.exists(pdf_path):
+        err_msg = f"❌ [分析准备失败] 本地物理 PDF 文件不存在: {pdf_path}"
+        print(err_msg)
         return "❌ 本地物理 PDF 文件丢失。"
         
     # 查询当前文献是否是手动导入的
@@ -109,7 +120,9 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
     # 从配置文件中获取对应的模型配置
     cfg = get_model_config(model_id)
     if not cfg:
-        return f"❌ 未在 API 配置文件中找到模型标识为 '{model_id}' 的配置。"
+        err_msg = f"❌ [分析准备失败] 未在 API 配置文件中找到模型标识为 '{model_id}' 的配置。"
+        print(err_msg)
+        return err_msg
         
     provider = cfg.get("provider", "openai_compatible")
     model_name = cfg.get("model", model_id)
@@ -169,16 +182,16 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
             "从第一性原理出发，重新评估 Host CPU 在该架构中的角色演进：\n"
             "- **从“纯控制面”到“混合计算面”**：在这篇论文的设计中，Host CPU 仅仅充当传统慢速搬运的“指挥官（控制面）”，还是深度参与了数据计算（计算面）？\n"
             "- **现代 CPU 指令集硬件红利**：论文是否充分压榨了最新 Host CPU 架构的硬件基础设施潜力？例如：\n"
-            "  - 是否利用了 **Intel AMX / AVX-512** 或 **ARM SVE/SVE2（如鲲鹏架构）** 的高性能矢量/矩阵指令集，在 Host 侧原地执行 $KV\\ Cache$ 的高性能量化与解量化（INT4/FP4/FP8）？\n"
+            "  - 是否利用了 **Intel AMX / AVX-512** 或 **ARM SVE/SVE2（如鲲鹏架构）** 的高性能矢量/矩阵指令集，在 Host 侧原地执行 $KV\ Cache$ 的高性能量化与解量化（INT4/FP4/FP8）？\n"
             "  - 是否利用了特定的现代 ARM 特性来加速地址转译或内存屏障？\n"
-            "- **算力抢占与生存空间（生态位）**：当 CPU 满载执行 $KV\\ Cache$ 压缩、内存置换或 Agent 的沙箱安全审计时，其对 Host 服务器其他常驻进程（如 OS 任务调度、网络 IO 驱动）的算力抢占效应如何？在真实的工业生产集群中，它处于什么生态位？\n\n"
+            "- **算力抢占与生存空间（生态位）**：当 CPU 满载执行 $KV\ Cache$ 压缩、内存置换或 Agent 的沙箱安全审计时，其对 Host 服务器其他常驻进程（如 OS 任务调度、网络 IO 驱动）的算力抢占效应如何？在真实的工业生产集群中，它处于什么生态位？\n\n"
             "### 4. ⚖️ 【科学批判：消融实验去伪存真与落地壁垒】\n"
             "请站在绝对中立、严苛批判的视角，挑剔地审视论文的硬伤：\n"
             "- **实验水分审计**：其对比的基线（Baselines）是否故意选择了过时的软件版本（如拿最新优化去对比未开启 PagedAttention 的早起 baseline）？其测试数据集是否属于“精挑细选的理想封闭场景（Cherry-picked）”？\n"
             "- **消融实验（Ablation Study）深度解密**：拆解消融实验图表，指出哪一个硬件参数或软件 Trick 才是该系统得以维系的“生命线”？一旦去除该特定的 Trick，其宣称的性能红利是否会发生断崖式暴跌（Cliff Effect）？\n"
             "- **边际效应与工程代价**：该方案为了提升 10% 的吞吐量，是否引入了过于冗余、复杂的软硬件堆栈与拓扑复杂度（Over-engineering）？\n"
             "- **真实硬件验证度**：该论文是在**真实的物理实体硬件拓扑（CXL 2.0/3.0 刀片服务器、物理 NVLink 节点）**上跑出来的硬核数据，还是仅仅基于**架构级仿真器（如 Gem5, NVMain, SimPoints）**跑出来的理想化数学数字？\n\n"
-            "---\n"
+            "-----------\n"
             "# 约束条件\n"
             "- 你的所有结论必须完全尊崇科学事实和逻辑机理，绝对禁止复述作者带有夸张色彩 of 结论。\n"
             "- 如果论文中缺失某些关键实验或未披露核心微架构开销，必须在报告中明确指出该论文的【信息缺失与黑盒疑点】。"
@@ -186,20 +199,28 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
 
     if provider == "gemini":
         if not api_key:
-            return f"❌ 运行环境中缺失 API Key (未在 api_config.json 设置且未在 {cfg.get('api_key_env', 'GEMINI_API_KEY')} 中找到)，Gemini 分析终止。"
+            err_msg = f"❌ [分析准备失败] 运行环境中缺失 API Key (未在 api_config.json 设置且未在 {cfg.get('api_key_env', 'GEMINI_API_KEY')} 中找到)，Gemini 分析终止。"
+            print(err_msg)
+            return err_msg
             
         client = genai.Client(api_key=api_key)
         
-        print(f"🤖 深度模型激活 [{display_name}]：正在剖析 {title}...")
+        print(f"🤖 深度模型激活 [{display_name}]：正在剖析 《{title}》...")
         try:
+            print(f"📤 [Gemini 文件上传] 正在将物理 PDF 上传至 Gemini API (多模态原生输入)...")
             uploaded_file = client.files.upload(file=pdf_path)
+            print(f"📡 [Gemini 文件上传] 物理 PDF 已成功上传至 Gemini 云端，文件 ID: {uploaded_file.name}")
             while uploaded_file.state.name == "PROCESSING":
+                print(f"⏳ [Gemini 预处理] 正在云端对 PDF 进行安全及多模态预处理，等待 2 秒...")
                 import time; time.sleep(2)
                 uploaded_file = client.files.get(name=uploaded_file.name)
                 
+            print(f"✅ [Gemini 预处理完成] 文件状态已就绪 (ID: {uploaded_file.name})。")
+            
             # 如果是手动添加的文献，先通过 Gemini 提炼出真实论文标题并更新数据库关联
             if is_manual:
                 try:
+                    print(f"🔍 [Gemini 标题提取] 手动导入的文献，正在发送标题提取请求...")
                     title_response = client.models.generate_content(
                         model=model_name,
                         contents=[uploaded_file, "请直接给出这篇论文的官方英文或中文真实标题，不需要任何其他解释、前缀、双引号或标点。只返回标题本身即可。"],
@@ -214,7 +235,8 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                         print(f"✅ 成功提取并关联论文真实标题: {extracted_title}")
                 except Exception as e:
                     print(f"⚠️ 提取论文真实标题失败: {e}")
-
+  
+            print(f"🚀 [Gemini 请求发送] 正在向 {display_name} ({model_name}) 发起多模态学术解构请求，等待大模型生成报告中...")
             response = client.models.generate_content(
                 model=model_name,
                 contents=[uploaded_file, f"请全面解构此论文: {title}"],
@@ -223,33 +245,44 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                     temperature=0.1
                 )
             )
+            print(f"📥 [Gemini 响应接收] 成功接收大模型分析结果 (长度 {len(response.text) if response.text else 0} 字符)。")
             
             client.files.delete(name=uploaded_file.name)
+            print(f"🧹 [Gemini 临时文件清理] 已删除云端临时文件: {uploaded_file.name}")
             save_ai_summary(paper_id, f"{display_name} ({model_name})", response.text)
+            print(f"✅ [Gemini 联合解构成功] 《{title}》解析完成，报告已成功落盘入库！")
             return response.text
             
         except Exception as e:
-            return f"❌ Gemini 联合解构失败: {e}"
-
+            err_msg = f"❌ Gemini 联合解构失败: {e}"
+            print(err_msg)
+            return err_msg
+ 
     elif provider == "openai_compatible" or provider == "deepseek":
         if not api_key:
-            return f"❌ 运行环境中缺失 API Key (未在 api_config.json 中设置，且未能在环境变量中读取)，分析终止。"
+            err_msg = f"❌ [分析准备失败] 运行环境中缺失 API Key (未在 api_config.json 中设置，且未能在环境变量中读取)，分析终止。"
+            print(err_msg)
+            return err_msg
             
         if not api_url:
-            return f"❌ OpenAI 兼容提供商需要配置有效的 'url' 终结点地址。"
+            err_msg = f"❌ [分析准备失败] OpenAI 兼容提供商需要配置有效的 'url' 终结点地址。"
+            print(err_msg)
+            return err_msg
             
-        print(f"🤖 深度模型激活 [{display_name}]：正在提取并剖析 {title}...")
+        print(f"🤖 深度模型激活 [{display_name}]：正在提取并剖析 《{title}》...")
         try:
             paper_text = extract_text_from_pdf(pdf_path)
             if not paper_text:
-                return "❌ PDF 文本提取失败，无法进行非多模态分析。"
+                err_msg = "❌ [PDF 文本提取失败] 提取文本为空，无法进行分析。"
+                print(err_msg)
+                return "❌ PDF 文本提取失败，无法进行 non-multimodal 分析。"
                 
             # 限制论文文本长度，防止超大 HTTP 负载导致 MTU 分片与 SSL 握手断开 (Bad Record MAC)
-            # 60,000 字符 (~1.5万词) 已足够完美覆盖论文的核心引言、架构、算法和实验，跳过冗长的参考文献
             max_char_limit = 60000
             if len(paper_text) > max_char_limit:
                 paper_text = paper_text[:max_char_limit] + "\n\n[...部分过长附录/参考文献文本已由系统安全截断以提升传输稳定性...]"
-
+                print(f"✂️ [PDF 文本裁切] 文本长度超过 {max_char_limit}，已自动裁切为 {len(paper_text)} 字符以保证 API 传输稳定性。")
+ 
             # 如果是手动添加的文献，先通过 OpenAI/DeepSeek 接口提炼出真实论文标题并更新数据库关联
             if is_manual:
                 try:
@@ -257,6 +290,7 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                         {"role": "system", "content": "你是一个学术助手。请从给出的论文文本片段中提取出这篇论文的官方真实标题。只返回标题本身，不要有任何多余的解释、前缀、双引号或标点。"},
                         {"role": "user", "content": f"提取以下论文开头的标题：\n\n{paper_text[:3000]}"}
                     ]
+                    print(f"🔍 [{display_name} 标题提取] 手动导入的文献，正在请求提取真实官方标题...")
                     t_response = make_llm_request(api_url, api_key, model_name, title_messages, temperature=0.0, timeout=3600)
                     content, err = parse_llm_response(t_response, "/responses" in api_url)
                     if not err and content:
@@ -269,7 +303,7 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                             print(f"✅ 成功提取并关联论文真实标题: {extracted_title}")
                 except Exception as e:
                     print(f"⚠️ 提取论文真实标题失败: {e}")
-
+ 
             messages = [
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": f"以下是学术论文《{title}》的完整文本内容，请全面进行辩证客观解构：\n\n{paper_text}"}
@@ -282,41 +316,57 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
             last_err = None
             is_responses_api = "/responses" in api_url
             
+            print(f"🚀 [LLM 请求发送] 正在向 {display_name} ({model_name}) 发起学术解构请求...")
             for attempt in range(max_retries):
                 try:
+                    print(f"⏳ [LLM 请求尝试 {attempt+1}/{max_retries}] 正在向 API 发送学术分析请求，等待大模型响应 (通常需要 20-60 秒，请耐心等待)...")
                     response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600)
                     if response.status_code == 200:
+                        print(f"📥 [LLM 响应接收] 成功收到大模型 HTTP 200 响应。")
                         break
                     else:
-                        print(f"⚠️ LLM 请求尝试 {attempt+1} 失败 (HTTP {response.status_code})")
+                        print(f"⚠️ LLM 请求尝试 {attempt+1} 失败 (HTTP {response.status_code}): {response.text}")
                 except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
                     last_err = e
                     print(f"⚠️ LLM 请求尝试 {attempt+1} 触发网络/SSL抖动: {e}")
                     if attempt < max_retries - 1:
+                        print(f"⏳ 正在进行指数退避，等待 {2 * (attempt + 1)} 秒后重试...")
                         time.sleep(2 * (attempt + 1))  # 指数退避退缩
                 except Exception as e:
                     last_err = e
                     print(f"⚠️ LLM 请求尝试 {attempt+1} 触发未知异常: {e}")
                     if attempt < max_retries - 1:
+                        print(f"⏳ 正在等待 1 秒后重试...")
                         time.sleep(1)
-
+ 
             if response is not None and response.status_code == 200:
+                print(f"📝 [LLM 响应解析] 正在解析大模型返回的学术报告...")
                 content, err = parse_llm_response(response, is_responses_api)
                 if not err and content:
                     save_ai_summary(paper_id, f"{display_name} ({model_name})", content)
+                    print(f"✅ [{display_name} 联合解构成功] 《{title}》解析完成，报告已成功落盘入库！")
                     return content
                 else:
-                    return f"❌ 解析响应失败: {err}"
+                    err_msg = f"❌ [{display_name} 联合解构失败] 解析响应失败: {err}"
+                    print(err_msg)
+                    return err_msg
             elif response is not None:
-                return f"❌ API 请求失败 (HTTP {response.status_code}): {response.text}"
+                err_msg = f"❌ [{display_name} 联合解构失败] API 请求最终失败 (HTTP {response.status_code}): {response.text}"
+                print(err_msg)
+                return err_msg
             else:
-                return f"❌ 联合解构失败 (网络与SSL握手在多次尝试后均断开): {last_err}"
+                err_msg = f"❌ [{display_name} 联合解构失败] 物理连接与 SSL 握手最终失败: {last_err}"
+                print(err_msg)
+                return err_msg
                 
         except Exception as e:
-            return f"❌ {display_name} 联合解构失败: {e}"
+            err_msg = f"❌ {display_name} 联合解构失败: {e}"
+            print(err_msg)
+            return err_msg
             
     else:
         return f"❌ 未知的 AI 分析大脑提供商: {provider}"
+
 
 def test_api_connection(model_id):
     """测试指定模型配置的连通性，并返回 (success, message, latency_seconds)"""
