@@ -854,6 +854,13 @@ with tab_briefings:
                 help="使用 gemini-2.5-flash 或 gemini-2.5-pro 进行快速联网分析与技术简报。"
             )
             
+            proxy_input = st.text_input(
+                "API 代理服务器地址 (可选)",
+                value=br_config.get("proxy", ""),
+                placeholder="例如: http://127.0.0.1:7890",
+                help="如果后台任务需要科学上网，请输入代理服务器地址，如 http://127.0.0.1:7890"
+            )
+            
             # 测试连通性按钮
             if st.button("⚡ 测试简报大脑连通性", key="test_briefing_api_btn", use_container_width=True):
                 resolved_key = masked_key.strip() if masked_key.strip() else os.environ.get("GEMINI_API_KEY", "").strip()
@@ -861,7 +868,7 @@ with tab_briefings:
                     st.error("🔴 连通性测试失败！未配置 API Key，且未检测到系统环境变量。")
                 else:
                     with st.spinner("正在向 Google Gemini 发送强联网诊断数据..."):
-                        success, message, latency = test_briefing_api_connection(resolved_key, selected_model)
+                        success, message, latency = test_briefing_api_connection(resolved_key, selected_model, proxy_input.strip())
                         if success:
                             st.success(f"🟢 **测试通过！**\n\n- 响应延时: `{latency}s`\n- {message}")
                         else:
@@ -905,7 +912,8 @@ with tab_briefings:
                         "daily_briefing_time": daily_time_str.strip(),
                         "weekly_insight_time": weekly_time_str.strip(),
                         "weekly_insight_day": weekly_day,
-                        "auto_scheduled": auto_scheduled
+                        "auto_scheduled": auto_scheduled,
+                        "proxy": proxy_input.strip()
                     }
                     if save_briefing_config(updated_br_config):
                         st.success("🎉 简报专属配置与调度设置保存成功！已即时热重载生效。")

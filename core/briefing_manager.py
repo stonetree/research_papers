@@ -19,7 +19,8 @@ def load_briefing_config():
             "daily_briefing_time": "09:00",
             "weekly_insight_time": "10:00",
             "weekly_insight_day": "Monday",
-            "auto_scheduled": True
+            "auto_scheduled": True,
+            "proxy": ""
         }
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         try:
@@ -66,6 +67,15 @@ def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     
+    # 代理支持
+    proxies = None
+    proxy_url = config.get("proxy", "").strip()
+    if proxy_url:
+        proxies = {
+            "http": proxy_url,
+            "https": proxy_url
+        }
+        
     # 显式注入 Google Search 工具以启用强联网搜索
     payload = {
         "contents": [{
@@ -87,28 +97,52 @@ def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
             }]
         }
     
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=3600)
-        response.raise_for_status()
-        json_data = response.json()
-        
-        candidate = json_data['candidates'][0]
-        
-        # 提取并检验联网元数据 Grounding Metadata
-        grounding_metadata = candidate.get('grounding_metadata', {})
-        web_search_queries = grounding_metadata.get('web_search_queries', [])
-        
-        if web_search_queries:
-            print(f"[{datetime.datetime.now()}] [成功联网] 触发的搜索关键词为: {web_search_queries}")
-        else:
-            print(f"[{datetime.datetime.now()}] [警告] Gemini 未触发联网搜索，可能使用了内部陈旧知识回答！")
+    max_retries = 3
+    last_err = None
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                print(f"[{datetime.datetime.now()}] [重试提示] 正在重试调用 Gemini API (第 {attempt+1}/{max_retries} 次尝试)...")
+            response = requests.post(url, json=payload, headers=headers, proxies=proxies, timeout=180)
+            response.raise_for_status()
+            json_data = response.json()
             
-        return candidate['content']['parts'][0]['text']
-        
-    except Exception as e:
-        error_msg = f"调用 Gemini API 失败: {e}"
-        print(f"[{datetime.datetime.now()}] {error_msg}")
-        return f"❌ 联网剖析失败。错误详情:\n```\n{e}\n```"
+            candidate = json_data['candidates'][0]
+            
+            # 提取并检验联网元数据 Grounding Metadata
+            grounding_metadata = candidate.get('grounding_metadata', {})
+            web_search_queries = grounding_metadata.get('web_search_queries', [])
+            
+            if web_search_queries:
+                print(f"[{datetime.datetime.now()}] [成功联网] 触发的搜索关键词为: {web_search_queries}")
+            else:
+                print(f"[{datetime.datetime.now()}] [警告] Gemini 未触发联网搜索，可能使用了内部陈旧知识回答！")
+                
+            return candidate['content']['parts'][0]['text']
+            
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            print(f"[{datetime.datetime.now()}] 第 {attempt+1} 次调用 Gemini API 失败: {e}")
+            # 输出环境诊断信息方便调试后台任务代理配置
+            import urllib.request
+            sys_proxies = urllib.request.getproxies()
+            print(f"[{datetime.datetime.now()}] [网络诊断] 当前配置代理: {proxy_url or '无'} | 系统级检测代理: {sys_proxies} | 环境变量: HTTP_PROXY={os.environ.get('HTTP_PROXY', '无')}, HTTPS_PROXY={os.environ.get('HTTPS_PROXY', '无')}")
+            
+            if attempt < max_retries - 1:
+                import time
+                sleep_time = 2 * (attempt + 1)
+                time.sleep(sleep_time)
+        except Exception as e:
+            # 针对 JSON 解析或其它非网络异常不重试直接失败
+            error_msg = f"调用 Gemini API 发生非网络异常: {e}"
+            print(f"[{datetime.datetime.now()}] {error_msg}")
+            return f"❌ 联网剖析失败。错误详情:\n```\n{e}\n```"
+            
+    # 如果所有重试都失败了
+    error_msg = f"调用 Gemini API 失败 (经过 {max_retries} 次尝试): {last_err}"
+    print(f"[{datetime.datetime.now()}] {error_msg}")
+    return f"❌ 联网剖析失败 (网络与SSL握手在多次尝试后均断开)。错误详情:\n```\n{last_err}\n```"
 
 def get_briefing_local_path(category):
     """计算物理归档相对路径，自动创建底层 YYYY年MM月/第X周/分类 物理目录"""
@@ -215,7 +249,7 @@ def list_archived_reports():
     reports.sort(key=lambda x: x["mtime"], reverse=True)
     return reports
 
-def test_briefing_api_connection(api_key, model_name):
+def test_briefing_api_connection(api_key, model_name, proxy_url=None):
     """专属诊断工具：诊断简报模型 API 连通性与响应延时"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
@@ -228,10 +262,17 @@ def test_briefing_api_connection(api_key, model_name):
         }]
     }
     
+    proxies = None
+    if proxy_url:
+        proxies = {
+            "http": proxy_url,
+            "https": proxy_url
+        }
+        
     try:
         import time
         start_time = time.time()
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        response = requests.post(url, json=payload, headers=headers, proxies=proxies, timeout=15)
         latency = round(time.time() - start_time, 2)
         
         if response.status_code == 200:
@@ -241,4 +282,6 @@ def test_briefing_api_connection(api_key, model_name):
         else:
             return False, f"HTTP {response.status_code}: {response.text}", 0.0
     except Exception as e:
-        return False, str(e), 0.0
+        import urllib.request
+        sys_proxies = urllib.request.getproxies()
+        return False, f"连接失败: {e} | 诊断环境代理: {sys_proxies}", 0.0
