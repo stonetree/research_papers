@@ -1,7 +1,29 @@
 # -*- coding: utf-8 -*-
+import builtins
+import datetime
+import re
+
+_original_print = builtins.print
+
+def timestamped_print(*args, **kwargs):
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    if args:
+        first_arg = args[0]
+        if isinstance(first_arg, str):
+            # Avoid double-timestamping if the first argument already starts with a timestamp like "[2026-06-10 ..."
+            if re.match(r"^\[\d{4}-\d{2}-\d{2}", first_arg):
+                _original_print(*args, **kwargs)
+            else:
+                _original_print(f"[{now_str}] {first_arg}", *args[1:], **kwargs)
+        else:
+            _original_print(f"[{now_str}]", *args, **kwargs)
+    else:
+        _original_print(f"[{now_str}]", **kwargs)
+
+builtins.print = timestamped_print
+
 import streamlit as st
 import os
-import re
 import threading
 from core.database import init_db, get_db_connection, resolve_pdf_path, insert_search_archive, get_search_archives, delete_search_archive
 from core.engine_semantic import execute_semantic_search
