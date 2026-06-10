@@ -81,6 +81,7 @@ if "db_monitor_started" not in st.session_state:
     
     from streamlit.runtime.scriptrunner import get_script_run_ctx
     from streamlit.runtime import get_instance as get_runtime_instance
+    import time
     
     ctx = get_script_run_ctx()
     if ctx:
