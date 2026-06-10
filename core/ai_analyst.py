@@ -6,6 +6,37 @@ import requests
 from .database import save_ai_summary
 from .config_loader import get_model_config, get_global_settings
 
+def _audit_api_call(provider, model_name, api_url="", request_label="llm_request"):
+    """记录同步 LLM 调用次数，供侧边栏日/周/月 API 计数展示。"""
+    try:
+        from .database import get_db_connection
+        provider_norm = (provider or "").lower()
+        model_norm = (model_name or "").lower()
+        url_norm = (api_url or "").lower()
+        if provider_norm == "gemini":
+            api_provider = "google"
+        elif "dashscope" in url_norm or "qwen" in model_norm:
+            api_provider = "dashscope"
+        elif "deepseek" in url_norm or "deepseek" in model_norm or provider_norm == "deepseek":
+            api_provider = "deepseek"
+        else:
+            api_provider = "deepseek"
+
+        conn = get_db_connection()
+        conn.execute(
+            """
+            INSERT INTO quota_ledger (
+                api_provider, model_name, api_metric, pricing_rule_id,
+                cost_usd, request_payload_summary
+            ) VALUES (?, ?, ?, 0, 0.0, ?)
+            """,
+            (api_provider, model_name or "unknown-model", "request_count", request_label)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ API 调用次数审计写入失败: {e}")
+
 def make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, max_tokens=None, timeout=3600):
     is_responses_api = "/responses" in api_url
     
@@ -90,22 +121,7 @@ def extract_text_from_pdf(pdf_path):
 
 def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
     from .database import resolve_pdf_path, get_db_connection
-    pdf_path = resolve_pdf_path(pdf_path)
-    if not os.path.exists(pdf_path):
-        return "❌ 本地物理 PDF 文件丢失。"
-        
-    # 查询当前文献是否是手动导入的
-    is_manual = False
-    conn = get_db_connection()
-    try:
-        row = conn.execute("SELECT source_engine FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
-        if row and row["source_engine"] == "manual":
-            is_manual = True
-    except Exception as e:
-        print(f"查询 source_engine 异常: {e}")
-    finally:
-        conn.close()
-        
+    
     # 从配置文件中获取对应的模型配置
     cfg = get_model_config(model_id)
     if not cfg:
@@ -116,6 +132,27 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
     api_key = cfg.get("resolved_api_key", "").strip()
     api_url = cfg.get("url", "").strip()
     display_name = cfg.get("name", model_id)
+
+    pdf_path = resolve_pdf_path(pdf_path)
+    if not os.path.exists(pdf_path):
+        err_msg = "❌ 本地物理 PDF 文件丢失。"
+        save_ai_summary(paper_id, f"{display_name} ({model_name})", err_msg)
+        return err_msg
+        
+    # 查询当前文献是否是手动导入的，同时读取 authors 备用
+    is_manual = False
+    paper_authors = "手动导入 (Local Import)"
+    conn = get_db_connection()
+    try:
+        row = conn.execute("SELECT source_engine, authors FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
+        if row:
+            if row["source_engine"] == "manual":
+                is_manual = True
+            paper_authors = row["authors"] or "手动导入 (Local Import)"
+    except Exception as e:
+        print(f"查询 source_engine 异常: {e}")
+    finally:
+        conn.close()
     
     # 读取全局配置以确定解析精细度及对应的 System Prompt
     global_settings = get_global_settings()
@@ -223,13 +260,37 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                     temperature=0.1
                 )
             )
+            _audit_api_call("gemini", model_name, request_label="paper_detailed_analysis")
             
             client.files.delete(name=uploaded_file.name)
-            save_ai_summary(paper_id, f"{display_name} ({model_name})", response.text)
-            return response.text
+            analysis_result = response.text
+            save_ai_summary(paper_id, f"{display_name} ({model_name})", analysis_result)
+
+            # 注入 V2 检索层（幂等安全，失败不影响主流程）
+            try:
+                from .ingestion import ingest_pdf_to_v2_sync
+                # 读取最新 title（可能已由 is_manual 分支更新）
+                conn2 = get_db_connection()
+                _row2 = conn2.execute("SELECT title FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
+                conn2.close()
+                _latest_title = _row2["title"] if _row2 else title
+                ingest_pdf_to_v2_sync(
+                    doc_id=paper_id,
+                    title=_latest_title,
+                    pdf_path=pdf_path,
+                    source_type="local_pdf",
+                    authors=paper_authors,
+                    ai_summary=analysis_result
+                )
+            except Exception as _v2_err:
+                print(f"⚠️ V2 摄取注入失败（不影响主流程）: {_v2_err}")
+
+            return analysis_result
             
         except Exception as e:
-            return f"❌ Gemini 联合解构失败: {e}"
+            err_msg = f"❌ Gemini 联合解构失败: {e}"
+            save_ai_summary(paper_id, f"{display_name} ({model_name})", err_msg)
+            return err_msg
 
     elif provider == "openai_compatible" or provider == "deepseek":
         if not api_key:
@@ -242,7 +303,9 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
         try:
             paper_text = extract_text_from_pdf(pdf_path)
             if not paper_text:
-                return "❌ PDF 文本提取失败，无法进行非多模态分析。"
+                err_msg = "❌ PDF 文本提取失败，无法进行非多模态分析。"
+                save_ai_summary(paper_id, f"{display_name} ({model_name})", err_msg)
+                return err_msg
                 
             # 限制论文文本长度，防止超大 HTTP 负载导致 MTU 分片与 SSL 握手断开 (Bad Record MAC)
             # 60,000 字符 (~1.5万词) 已足够完美覆盖论文的核心引言、架构、算法和实验，跳过冗长的参考文献
@@ -286,6 +349,7 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                 try:
                     response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600)
                     if response.status_code == 200:
+                        _audit_api_call(provider, model_name, api_url, "paper_detailed_analysis")
                         break
                     else:
                         print(f"⚠️ LLM 请求尝试 {attempt+1} 失败 (HTTP {response.status_code})")
@@ -304,16 +368,44 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                 content, err = parse_llm_response(response, is_responses_api)
                 if not err and content:
                     save_ai_summary(paper_id, f"{display_name} ({model_name})", content)
+
+                    # 注入 V2 检索层（幂等安全，失败不影响主流程）
+                    try:
+                        from .ingestion import ingest_pdf_to_v2_sync
+                        # 读取最新 title（可能已由 is_manual 分支更新）
+                        conn2 = get_db_connection()
+                        _row2 = conn2.execute("SELECT title FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
+                        conn2.close()
+                        _latest_title = _row2["title"] if _row2 else title
+                        ingest_pdf_to_v2_sync(
+                            doc_id=paper_id,
+                            title=_latest_title,
+                            pdf_path=pdf_path,
+                            source_type="local_pdf",
+                            authors=paper_authors,
+                            ai_summary=content
+                        )
+                    except Exception as _v2_err:
+                        print(f"⚠️ V2 摄取注入失败（不影响主流程）: {_v2_err}")
+
                     return content
                 else:
-                    return f"❌ 解析响应失败: {err}"
+                    err_msg = f"❌ 解析响应失败: {err}"
+                    save_ai_summary(paper_id, f"{display_name} ({model_name})", err_msg)
+                    return err_msg
             elif response is not None:
-                return f"❌ API 请求失败 (HTTP {response.status_code}): {response.text}"
+                err_msg = f"❌ API 请求失败 (HTTP {response.status_code}): {response.text}"
+                save_ai_summary(paper_id, f"{display_name} ({model_name})", err_msg)
+                return err_msg
             else:
-                return f"❌ 联合解构失败 (网络与SSL握手在多次尝试后均断开): {last_err}"
+                err_msg = f"❌ 联合解构失败 (网络与SSL握手在多次尝试后均断开): {last_err}"
+                save_ai_summary(paper_id, f"{display_name} ({model_name})", err_msg)
+                return err_msg
                 
         except Exception as e:
-            return f"❌ {display_name} 联合解构失败: {e}"
+            err_msg = f"❌ {display_name} 联合解构失败: {e}"
+            save_ai_summary(paper_id, f"{display_name} ({model_name})", err_msg)
+            return err_msg
             
     else:
         return f"❌ 未知的 AI 分析大脑提供商: {provider}"
@@ -425,6 +517,7 @@ def arbitrate_papers(candidates, topic_name, model_id):
                     temperature=0.1
                 )
             )
+            _audit_api_call("gemini", model_name, request_label="paper_abstract_relevance")
             text = clean_json_string(response.text)
             return json.loads(text)
         except Exception as e:
@@ -442,6 +535,7 @@ def arbitrate_papers(candidates, topic_name, model_id):
             is_responses_api = "/responses" in api_url
             response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600)
             if response.status_code == 200:
+                _audit_api_call(provider, model_name, api_url, "paper_abstract_relevance")
                 content, err = parse_llm_response(response, is_responses_api)
                 if not err and content:
                     text = clean_json_string(content)

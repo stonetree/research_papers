@@ -14,6 +14,7 @@ from core.library_scanner import sync_local_library, get_unanalyzed_papers
 from core.scheduler import start_scheduler, add_scheduler_task, delete_scheduler_task, get_active_tasks
 from core.funnel_search import execute_two_stage_funnel_search
 from config.research_topics import TOPIC_REGISTRY
+from core.env_helper import get_env_var
 
 # 初始化本地数据库和 API 配置大仓，启动后台定时扫描服务
 init_db()
@@ -43,6 +44,43 @@ def extract_snippet_with_highlight(text, keyword, length=200):
         flags=re.IGNORECASE
     )
     return highlighted
+
+def format_evidence_url(url: str) -> str:
+    if not url:
+        return "#"
+    if url.startswith("https://radar.ai/migrated/"):
+        arxiv_id = url.replace("https://radar.ai/migrated/", "")
+        arxiv_id_clean = arxiv_id.replace("_", ".")
+        # 判定是否是标准的 arXiv ID 或旧版的类别/ID形式
+        if re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", arxiv_id_clean) or "/" in arxiv_id_clean:
+            return f"https://arxiv.org/abs/{arxiv_id_clean}"
+    return url
+
+def get_api_call_count_summary():
+    """按 API provider 聚合本日、本周、本月调用次数。"""
+    providers = ["deepseek", "dashscope", "google", "exa", "firecrawl"]
+    summary = {p: {"today": 0, "week": 0, "month": 0} for p in providers}
+    try:
+        conn = get_db_connection()
+        rows = conn.execute("""
+            SELECT
+                api_provider,
+                SUM(CASE WHEN created_at >= datetime('now', 'start of day') THEN 1 ELSE 0 END) AS today_count,
+                SUM(CASE WHEN created_at >= datetime('now', '-7 days') THEN 1 ELSE 0 END) AS week_count,
+                SUM(CASE WHEN created_at >= datetime('now', 'start of month') THEN 1 ELSE 0 END) AS month_count
+            FROM quota_ledger
+            GROUP BY api_provider
+        """).fetchall()
+        conn.close()
+        for row in rows:
+            provider = row["api_provider"]
+            summary.setdefault(provider, {"today": 0, "week": 0, "month": 0})
+            summary[provider]["today"] = int(row["today_count"] or 0)
+            summary[provider]["week"] = int(row["week_count"] or 0)
+            summary[provider]["month"] = int(row["month_count"] or 0)
+    except Exception as e:
+        print(f"读取 API 调用次数统计失败: {e}")
+    return summary
 
 if "unanalyzed_papers" not in st.session_state:
     st.session_state["unanalyzed_papers"] = []
@@ -131,15 +169,23 @@ st.sidebar.subheader("🔌 系统诊断与状态")
 # 读取开机默认大脑设置并匹配选项索引
 default_model_id = get_default_model()
 model_keys = list(api_models.keys())
-default_index = model_keys.index(default_model_id) if default_model_id in model_keys else 0
+global_settings_sidebar = get_global_settings()
+detailed_analysis_model_id = global_settings_sidebar.get("detailed_analysis_model_id", default_model_id)
+abstract_relevance_model_id = global_settings_sidebar.get("abstract_relevance_model_id", default_model_id)
+default_index = model_keys.index(detailed_analysis_model_id) if detailed_analysis_model_id in model_keys else (model_keys.index(default_model_id) if default_model_id in model_keys else 0)
 
 selected_brain_key = st.sidebar.selectbox(
-    "首席科学家 AI 大脑",
+    "论文精细化分析大脑",
     options=model_keys,
     index=default_index,
     format_func=lambda x: api_models[x].get("name", x),
     key="active_reading_brain_sidebar"
 )
+selected_analysis_model_id = selected_brain_key
+selected_relevance_model_id = abstract_relevance_model_id if abstract_relevance_model_id in model_keys else selected_analysis_model_id
+selected_online_search_model_id = global_settings_sidebar.get("search_model_id", selected_analysis_model_id)
+if selected_online_search_model_id not in model_keys:
+    selected_online_search_model_id = selected_analysis_model_id
 
 # 守护调度线程状态
 is_scheduler_running = any(t.name == "RadarSchedulerDaemon" for t in threading.enumerate())
@@ -165,11 +211,35 @@ st.sidebar.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("📈 API 调用次数")
+api_call_counts = get_api_call_count_summary()
+provider_labels = {
+    "deepseek": "DeepSeek",
+    "dashscope": "DashScope",
+    "google": "Google",
+    "exa": "Exa",
+    "firecrawl": "Firecrawl"
+}
+st.sidebar.caption("统计口径：`quota_ledger` 中已登记的 API 调用流水；本周为最近 7 天。")
+for provider, label in provider_labels.items():
+    item = api_call_counts.get(provider, {"today": 0, "week": 0, "month": 0})
+    st.sidebar.markdown(
+        f"""
+        <div style='font-size: 0.88rem; line-height: 1.55; padding: 4px 0;'>
+            <b>{label}</b><br>
+            今日 <code>{item['today']}</code> 次 · 本周 <code>{item['week']}</code> 次 · 本月 <code>{item['month']}</code> 次
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-# 主界面：五重选项卡分流
-tab_library, tab_model_search, tab_scheduler, tab_briefings, tab_global_config = st.tabs([
+
+# 主界面：六重选项卡分流
+tab_library, tab_model_search, tab_local_search, tab_scheduler, tab_briefings, tab_global_config = st.tabs([
     "📂 本地沉淀文献大仓", 
     "🔍 AI 联网学术探测",
+    "🔎 本地大仓检索",
     "⏰ 智能定时扫描与解构调度", 
     "🌐 AI 24h雷达与技术洞察", 
     "⚙️ 全局系统配置"
@@ -210,15 +280,15 @@ with tab_library:
         )
     with col_scan_btn:
         st.markdown("<div style='padding-top: 28px;'></div>", unsafe_allow_html=True)
-        scan_triggered = st.button("🚀 触发雷达", key="library_scan_btn", use_container_width=True)
+        scan_triggered = st.button("🚀 触发雷达", key="library_scan_btn", width="stretch")
     with col_sync_btn:
         st.markdown("<div style='padding-top: 28px;'></div>", unsafe_allow_html=True)
-        sync_triggered = st.button("🔄 同步大仓", key="library_sync_btn", use_container_width=True, help="扫描并同步本地手动下载的 PDF 文件，更新大仓索引")
+        sync_triggered = st.button("🔄 同步大仓", key="library_sync_btn", width="stretch", help="扫描并同步本地手动下载的 PDF 文件，更新大仓索引")
     with col_batch_btn:
         st.markdown("<div style='padding-top: 28px;'></div>", unsafe_allow_html=True)
         batch_label = f"🤖 并发补全 ({total_papers})" if total_papers > 0 else "🤖 无待补全"
         batch_disabled = (total_papers == 0)
-        batch_completer = st.button(batch_label, key="library_batch_complete_btn", use_container_width=True, disabled=batch_disabled, help="并发解析已入库但尚未生成报告的文献")
+        batch_completer = st.button(batch_label, key="library_batch_complete_btn", width="stretch", disabled=batch_disabled, help="并发解析已入库但尚未生成报告的文献")
 
     # 反馈信息容器
     status_container = st.container()
@@ -235,7 +305,7 @@ with tab_library:
                         topic_name=topic["name"],
                         query_string=topic["mapping_query"],
                         target_limit=search_limit,
-                        model_id=selected_brain_key
+                        model_id=selected_relevance_model_id
                     )
                 except Exception as e:
                     st.error(f"❌ 漏斗检索发生异常故障: {e}")
@@ -244,9 +314,9 @@ with tab_library:
                 st.success(f"🎉 【{used_engine}】成功抓取并仲裁沉淀 {len(new_items)} 篇黄金文献！")
                 has_error = False
                 for item in new_items:
-                    brain_name = api_models[selected_brain_key].get("name", selected_brain_key)
+                    brain_name = api_models[selected_analysis_model_id].get("name", selected_analysis_model_id)
                     with st.spinner(f"🤖 正在激活 {brain_name} 全景解构: {item['title'][:30]}..."):
-                        res = analyze_and_store_paper(item["paper_id"], item["pdf_path"], item["title"], model_id=selected_brain_key)
+                        res = analyze_and_store_paper(item["paper_id"], item["pdf_path"], item["title"], model_id=selected_analysis_model_id)
                         if res.startswith("❌"):
                             st.error(res)
                             has_error = True
@@ -286,13 +356,13 @@ with tab_library:
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
-                    executor.submit(analyze_and_store_paper, paper["paper_id"], paper["pdf_path"], paper["title"], model_id=selected_brain_key): paper
+                    executor.submit(analyze_and_store_paper, paper["paper_id"], paper["pdf_path"], paper["title"], model_id=selected_analysis_model_id): paper
                     for paper in papers_to_process
                 }
                 
                 for idx, future in enumerate(as_completed(futures)):
                     paper = futures[future]
-                    brain_name = api_models[selected_brain_key].get("name", selected_brain_key)
+                    brain_name = api_models[selected_analysis_model_id].get("name", selected_analysis_model_id)
                     status_text.caption(f"[{idx+1}/{total_papers}] 并发完成: {paper['title'][:15]}...")
                     
                     try:
@@ -392,29 +462,31 @@ with tab_library:
             btn_col1, btn_col2, btn_col3, btn_col4 = st.columns([1, 1, 2, 2.5])
             with btn_col1:
                 prev_disabled = (curr_idx <= 0)
-                if st.button("⏮️ 上一篇", key="prev_paper_btn", use_container_width=True, disabled=prev_disabled):
+                if st.button("⏮️ 上一篇", key="prev_paper_btn", width="stretch", disabled=prev_disabled):
                     st.session_state["active_view_paper_id"] = paper_ids[curr_idx - 1]
                     st.rerun()
             with btn_col2:
                 next_disabled = (curr_idx == len(paper_ids) - 1 or curr_idx == -1)
-                if st.button("下一篇 ⏭️", key="next_paper_btn", use_container_width=True, disabled=next_disabled):
+                if st.button("下一篇 ⏭️", key="next_paper_btn", width="stretch", disabled=next_disabled):
                     st.session_state["active_view_paper_id"] = paper_ids[curr_idx + 1]
                     st.rerun()
             with btn_col3:
-                if paper['dialectical_analysis']:
+                has_valid_analysis = paper['dialectical_analysis'] and not paper['dialectical_analysis'].startswith("❌")
+                if has_valid_analysis:
                     st.download_button(
                         label="📥 一键导出 Markdown 报告",
                         data=paper['dialectical_analysis'],
                         file_name=f"{paper['title']}_AI学术解构报告.md",
                         mime="text/markdown",
                         key=f"export_detail_{paper['paper_id']}",
-                        use_container_width=True
+                        width="stretch"
                     )
                 else:
-                    brain_name = api_models[selected_brain_key].get("name", selected_brain_key)
-                    if st.button(f"🤖 激活 {brain_name} 解构", key=f"detail_activate_{paper['paper_id']}", use_container_width=True, type="primary"):
+                    brain_name = api_models[selected_analysis_model_id].get("name", selected_analysis_model_id)
+                    btn_label = f"🔄 重新激活 {brain_name} 解构" if paper['dialectical_analysis'] else f"🤖 激活 {brain_name} 解构"
+                    if st.button(btn_label, key=f"detail_activate_{paper['paper_id']}", width="stretch", type="primary"):
                         with st.spinner("正在解构剖析中..."):
-                            analysis_text = analyze_and_store_paper(paper['paper_id'], paper['pdf_path'], paper['title'], model_id=selected_brain_key)
+                            analysis_text = analyze_and_store_paper(paper['paper_id'], paper['pdf_path'], paper['title'], model_id=selected_analysis_model_id)
                             if analysis_text.startswith("❌"):
                                 st.error(analysis_text)
                             else:
@@ -460,7 +532,13 @@ with tab_library:
                     is_selected = (p_id == active_paper_id)
                     
                     card_emoji = "📖" if is_selected else "📄"
-                    ai_status = "🟢" if p["dialectical_analysis"] else "⏳"
+                    if p["dialectical_analysis"]:
+                        if p["dialectical_analysis"].startswith("❌"):
+                            ai_status = "🔴"
+                        else:
+                            ai_status = "🟢"
+                    else:
+                        ai_status = "⏳"
                     
                     card_title = f"{card_emoji} {p['title']}"
                     card_meta = f"{ai_status} [{p['venue'] or '顶会'}] {p['year']} | 📈 引用: {p['citations']}"
@@ -476,7 +554,7 @@ with tab_library:
                             st.markdown(f"<div style='font-size: 0.85rem; color: #555; background: #f0f2f6; padding: 4px; border-radius: 4px; margin-bottom: 6px;'>🔍 {snippet}</div>", unsafe_allow_html=True)
                             
                         btn_label = "👉 正在阅读" if is_selected else "📖 极速阅读解构报告"
-                        if st.button(btn_label, key=f"select_btn_{p_id}", use_container_width=True, type="primary" if is_selected else "secondary"):
+                        if st.button(btn_label, key=f"select_btn_{p_id}", width="stretch", type="primary" if is_selected else "secondary"):
                             st.session_state["active_view_paper_id"] = p_id
                             st.rerun()
 
@@ -498,7 +576,10 @@ with tab_library:
                 
                 st.markdown("##### 💡 首席科学家 AI 剖析报告正文")
                 if paper['dialectical_analysis']:
-                    st.markdown(paper['dialectical_analysis'])
+                    if paper['dialectical_analysis'].startswith("❌"):
+                        st.error(paper['dialectical_analysis'])
+                    else:
+                        st.markdown(paper['dialectical_analysis'])
                 else:
                     st.warning("⏳ 暂无该论文的 AI 深度解构。")
         else:
@@ -508,151 +589,206 @@ with tab_library:
 
 with tab_model_search:
     st.subheader("🔍 AI 大脑联网学术探测")
-    st.markdown("该模块直接将您的科研检索词发送给当前选定的 AI 大脑，触发大模型的内置联网搜索功能（Bailian Responses API），联网发掘最前沿、高质量 of 学术成果，并提供即时分析报告与链接。")
+    st.markdown("该模块已升级为 **Pipeline B 一体化学术探测通路**。系统将执行 FTS5 + LanceDB 双路并行检索，当置信度未击穿门槛时，自动唤醒 Exa 探针精准打捞并 2PC 安全落库，最终由选定的 AI 大脑进行事实问答合成，保证 100% 真实引用。")
     
-    # 自动检索可用的联网探测大脑
-    search_capable_models = get_search_capable_models(api_models)
-    
-    if not search_capable_models:
-        st.warning("⚠️ **联网搜索探测功能当前不可用**")
-        st.info(
-            "**原因**：未在您的模型配置中检测到任何支持内置联网搜索功能（Bailian Responses API）的模型。\n\n"
-            "**💡 解决方案**：\n"
-            "1. 请前往右侧的 **“⚙️ 全局系统配置”** 选项卡；\n"
-            "2. 新增或编辑现有模型，确保其服务提供商为 `openai_compatible` 或 `deepseek`，且接口的 Endpoint URL 配置为百炼的 Responses 终结点（例如 `https://dashscope.aliyuncs.com/compatible-mode/v1/responses`）。"
-        )
-        
-        # 禁用输入面板
-        with st.container(border=True):
-            st.text_input(
-                "输入您关心的技术关键词/搜索 Query", 
+    # 初始化会话状态以存储搜索结果
+    if "model_search_results_v2" not in st.session_state:
+        st.session_state["model_search_results_v2"] = None
+    if "model_search_query_used" not in st.session_state:
+        st.session_state["model_search_query_used"] = ""
+
+    # 配置区
+    with st.container(border=True):
+        col_query_in, col_filter, col_penetrate = st.columns([2.5, 1.2, 1.3])
+        with col_query_in:
+            model_query = st.text_input(
+                "输入您关心的技术关键词/提问 Query", 
                 value="", 
-                placeholder="探测功能已锁定，请先配置支持联网搜索的模型...",
-                key="model_search_query_input_disabled",
-                disabled=True,
+                placeholder="例如: CXL 3.0 cache coherence, vLLM KV cache optimization...",
+                key="model_search_query_input",
                 label_visibility="collapsed"
             )
-            st.button("🚀 启动 AI 联网搜索", type="primary", use_container_width=True, disabled=True)
-    else:
-        # 读取配置的联网搜索大脑
-        global_settings = get_global_settings()
-        configured_search_model = global_settings.get("search_model_id", "")
-        
-        # 确定实际使用的模型ID
-        if configured_search_model in search_capable_models:
-            active_search_model_id = configured_search_model
+        with col_filter:
+            target_filter = st.selectbox(
+                "打捞数据源类型",
+                options=["arxiv_paper", "ext_blog"],
+                format_func=lambda x: {
+                    "arxiv_paper": "📚 学术论文",
+                    "ext_blog": "🌐 技术博客/网页"
+                }.get(x, x),
+                index=0,
+                key="model_search_filter_selector"
+            )
+        with col_penetrate:
+            force_penetrate = st.checkbox(
+                "🔥 强制穿透外部打捞",
+                value=False,
+                help="即使本地大仓存在高置信度匹配，依然强制发起 Exa 外部联网打捞"
+            )
+
+        trigger_search = st.button("🚀 启动 AI 联网学术探测", type="primary", width="stretch")
+
+    if trigger_search:
+        if not model_query.strip():
+            st.warning("⚠️ 请输入有效的提问 Query。")
         else:
-            active_search_model_id = list(search_capable_models.keys())[0]
-            
-        active_search_model_name = search_capable_models[active_search_model_id].get("name", active_search_model_id)
-        
-        st.markdown(f"🎯 **当前联网搜索大脑**：`{active_search_model_name}`")
-        
-        # 初始化会话状态以存储搜索结果
-        if "model_search_results" not in st.session_state:
-            st.session_state["model_search_results"] = None
-        if "model_search_query_used" not in st.session_state:
-            st.session_state["model_search_query_used"] = ""
-
-        # 联网搜索面板
-        with st.container(border=True):
-            col_query_in, col_query_btn = st.columns([4, 1])
-            with col_query_in:
-                model_query = st.text_input(
-                    "输入您关心的技术关键词/搜索 Query", 
-                    value="", 
-                    placeholder="例如: CXL 3.0 cache coherence, vLLM KV cache optimization...",
-                    key="model_search_query_input",
-                    label_visibility="collapsed"
-                )
-            with col_query_btn:
-                trigger_search = st.button("🚀 启动 AI 联网搜索", type="primary", use_container_width=True)
-
-        if trigger_search:
-            if not model_query.strip():
-                st.warning("⚠️ 请输入有效的搜索 Query。")
-            else:
-                with st.spinner(f"正在通过 {active_search_model_name} 联网检索 {model_query.strip()}..."):
-                    success, result = model_web_search(model_query.strip(), active_search_model_id)
-                    if success:
-                        st.session_state["model_search_results"] = result
-                        st.session_state["model_search_query_used"] = model_query.strip()
-                        st.toast("🟢 检索完成！")
-                    else:
-                        st.error(f"🔴 检索失败: {result}")
-
-    # 显示检索结果
-    if st.session_state.get("model_search_results") is not None:
-        st.markdown("---")
-        res_col_left, res_col_right = st.columns([1.8, 1])
-        
-        selected_indices = []
-        with res_col_left:
-            st.markdown(f"##### 📡 联网搜索结果 — `{st.session_state['model_search_query_used']}`")
-            
-            for idx, p in enumerate(st.session_state["model_search_results"]):
-                with st.container(border=True):
-                    sel = st.checkbox(
-                        f"**{p.get('title', '无标题')}**", 
-                        value=True, 
-                        key=f"model_search_sel_{idx}"
-                    )
-                    if sel:
-                        selected_indices.append(idx)
-                    st.markdown(f"**👥 作者团队**: {p.get('authors', '未知')} &nbsp;|&nbsp; **📅 年份/会议**: {p.get('year_venue', '未知')}")
-                    st.info(f"创新点简述: {p.get('summary', '无')}")
-                    st.markdown(f"🔗 [可访问链接/PDF下载地址]({p.get('url', '#')})")
-                    
-        with res_col_right:
-            st.markdown("##### ⚙️ 探测结果控制台")
-            
-            # 1. 归档历史功能
-            with st.container(border=True):
-                st.markdown("**🗄️ 搜索归档管理**")
-                st.caption("将本次搜索返回的论文列表以当前时间戳记录归档，以便日后重新载入查看或批量下载。")
-                if st.button("🗄️ 归档本次检索历史", use_container_width=True):
-                    import json
-                    import uuid
-                    import datetime
-                    archive_id = f"arc_{uuid.uuid4().hex[:8]}"
-                    results_json = json.dumps(st.session_state["model_search_results"], ensure_ascii=False)
-                    insert_search_archive(archive_id, st.session_state["model_search_query_used"], results_json)
-                    st.success("🎉 本次检索历史成功归档到本地数据库！")
-                    st.rerun()
-                    
-            # 2. 批量物理下载与 AI 解构功能
-            with st.container(border=True):
-                st.markdown("**📥 批量下载与 AI 全景剖析**")
-                st.caption(f"系统将对左侧勾选的 **{len(selected_indices)}** 篇文献进行物理 PDF 抓取，完成自动登记，并调用 AI 首席科学家完成力作报告的生成。")
+            with st.status("🚀 正在启动双路混合检索与 Pipeline B 打捞合成流水线...", expanded=True) as status:
+                import asyncio
+                from core.search_engine import execute_unified_studio_search_flow
                 
-                if st.button("📥 开始下载并生成解构报告", type="primary", use_container_width=True):
-                    if not selected_indices:
-                        st.warning("⚠️ 请至少勾选一篇论文进行操作。")
+                def update_progress(text):
+                    status.write(text)
+                    status.update(label=text)
+                
+                try:
+                    res = asyncio.run(execute_unified_studio_search_flow(
+                        query=model_query.strip(),
+                        filter_type=target_filter,
+                        force_penetrate=force_penetrate,
+                        model_id=selected_online_search_model_id,
+                        on_progress=update_progress
+                    ))
+                    
+                    if res.get("status") == "success":
+                        st.session_state["model_search_results_v2"] = {
+                            "answer": res.get("answer", ""),
+                            "evidences": res.get("evidences", []),
+                            "routing_path": res.get("routing_path", ""),
+                            "query": model_query.strip(),
+                            "model_id": selected_online_search_model_id
+                        }
+                        st.session_state["model_search_query_used"] = model_query.strip()
+                        status.write("🟢 AI 大脑对账与解答合成完毕！")
+                        status.update(label="🟢 联网学术探测及问答合成成功！", state="complete", expanded=False)
+                        st.toast("🟢 联网学术探测及问答合成成功！")
+                        st.rerun()
                     else:
-                        progress_bar = st.progress(0.0)
-                        status_text = st.empty()
+                        status.write(f"🔴 探测失败: {res.get('error', '未知错误')}")
+                        status.update(label=f"🔴 探测失败: {res.get('error', '未知错误')}", state="error", expanded=True)
+                except Exception as e:
+                    status.write(f"❌ 运行探测流发生异常: {e}")
+                    status.update(label=f"❌ 运行探测流发生异常: {e}", state="error", expanded=True)
+
+    # 显示结果
+    search_res = st.session_state.get("model_search_results_v2")
+    if search_res is not None:
+        st.markdown("---")
+        
+        # 1. 判定返回的是 V2 格式 (dict) 还是 V1 格式 (list)
+        if isinstance(search_res, dict):
+            # V2 格式：单栏渲染问答与文献
+            st.markdown(f"##### 🧠 AI 大脑辩证答复 — `{search_res['query']}`")
+            
+            # 展现路由路径诊断
+            path = search_res.get("routing_path", "")
+            if path == "local_cache_hit":
+                st.success("🎯 **检索路径诊断**：本地大仓高置信度精确命中！执行 0 成本本地解答合成。")
+            elif path == "exa_penetrate_funnel":
+                st.warning("🔍 **检索路径诊断**：本地大仓未完全覆盖，或者开启了强制穿透。已启动 Exa 神经网络打捞，并将最新成果 2PC 沉淀落库。")
+            else:
+                st.info(f"ℹ️ **检索路径诊断**：{path}")
+            
+            # 用 Glassmorphism 样式容器渲染 AI 答复
+            st.markdown(f"""
+            <div style='background: rgba(255, 255, 255, 0.7); 
+                        backdrop-filter: blur(10px); 
+                        border: 1px solid rgba(229, 231, 235, 0.5); 
+                        border-radius: 12px; 
+                        padding: 20px; 
+                        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+                        margin-bottom: 20px;'>
+                <div style='font-size: 1rem; color: #1F2937; line-height: 1.7;'>
+                    {search_res['answer']}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.markdown("##### 📚 事实证据与引用文献")
+            
+            evidences = search_res.get("evidences", [])
+            if not evidences:
+                st.info("💡 该答复未绑定任何具体的本地证据卡片。")
+            else:
+                for idx, ev in enumerate(evidences):
+                    with st.container(border=True):
+                        title_str = ev.get("title", "无标题")
+                        url_str = format_evidence_url(ev.get("canonical_url", "#"))
+                        doc_id = ev.get("doc_id", "unknown")
+                        hybrid_score = ev.get("hybrid_score", 0.0)
                         
-                        success_count = 0
-                        for i, idx in enumerate(selected_indices):
-                            paper_info = st.session_state["model_search_results"][idx]
-                            status_text.caption(f"正在处理 [{i+1}/{len(selected_indices)}]: {paper_info.get('title', '')[:20]}...")
+                        st.markdown(f"**[{idx+1}] [{doc_id}]** [{title_str}]({url_str})")
+                        st.caption(f"📍 章节/位置: `{ev.get('section_path', 'N/A')}` &nbsp;|&nbsp; 📄 页码: `p.{ev.get('page_number', '1')}` &nbsp;|&nbsp; 📈 得分: `{hybrid_score:.4f}`")
+                        st.markdown(f"<div style='font-size: 0.88rem; color: #4B5563; background-color: #F9FAFB; padding: 8px; border-radius: 6px; border-left: 3px solid #6366F1;'>{ev.get('text', '')[:300]}...</div>", unsafe_allow_html=True)
+                        
+            # 归档按钮
+            st.markdown("---")
+            if st.button("🗄️ 归档本次检索与解答历史", width="stretch"):
+                import json
+                import uuid
+                archive_id = f"arc_{uuid.uuid4().hex[:8]}"
+                results_json = json.dumps(search_res, ensure_ascii=False)
+                insert_search_archive(archive_id, search_res["query"], results_json)
+                st.success("🎉 本次检索及解答已成功归档到本地数据库！")
+                st.rerun()
+            
+            # 兼容空行，以保持与 elif 之间的一致性
+            
+        elif isinstance(search_res, list):
+            # V1 格式：兼容旧版归档列表展示
+            res_col_left, res_col_right = st.columns([1.8, 1])
+            
+            selected_indices = []
+            with res_col_left:
+                st.markdown(f"##### 📡 联网搜索结果 — `{st.session_state['model_search_query_used']}` (兼容V1格式)")
+                
+                for idx, p in enumerate(search_res):
+                    with st.container(border=True):
+                        sel = st.checkbox(
+                            f"**{p.get('title', '无标题')}**", 
+                            value=True, 
+                            key=f"model_search_sel_{idx}"
+                        )
+                        if sel:
+                            selected_indices.append(idx)
+                        st.markdown(f"**👥 作者团队**: {p.get('authors', '未知')} &nbsp;|&nbsp; **📅 年份/会议**: {p.get('year_venue', '未知')}")
+                        st.info(f"创新点简述: {p.get('summary', '无')}")
+                        st.markdown(f"🔗 [可访问链接/PDF下载地址]({p.get('url', '#')})")
+                        
+            with res_col_right:
+                st.markdown("##### ⚙️ 探测结果控制台")
+                
+                # 重新下载与 AI 解构功能
+                with st.container(border=True):
+                    st.markdown("**📥 批量下载与 AI 全景剖析**")
+                    st.caption(f"对左侧勾选的 **{len(selected_indices)}** 篇文献进行物理 PDF 抓取，完成自动登记，并调用 AI 首席科学家完成报告生成。")
+                    
+                    if st.button("📥 开始下载并生成解构报告", type="primary", width="stretch"):
+                        if not selected_indices:
+                            st.warning("⚠️ 请至少勾选一篇论文进行操作。")
+                        else:
+                            progress_bar = st.progress(0.0)
+                            status_text = st.empty()
                             
-                            success, msg = download_and_import_paper(paper_info, selected_brain_key)
-                            if success:
-                                success_count += 1
-                                st.toast(f"✅ {paper_info.get('title')[:15]} 导入成功")
-                            else:
-                                st.error(f"❌ 导入失败 《{paper_info.get('title')[:15]}》: {msg}")
+                            success_count = 0
+                            for i, idx in enumerate(selected_indices):
+                                paper_info = search_res[idx]
+                                status_text.caption(f"正在处理 [{i+1}/{len(selected_indices)}]: {paper_info.get('title', '')[:20]}...")
                                 
-                            progress_bar.progress((i + 1) / len(selected_indices))
-                            
-                        status_text.empty()
-                        if success_count > 0:
-                            st.success(f"🎉 成功完成 {success_count} 篇黄金文献的下载、入库与大模型剖析！")
-                            # 清除已有的未分析文献缓存
-                            if "unanalyzed_papers" in st.session_state:
-                                del st.session_state["unanalyzed_papers"]
-                            st.rerun()
+                                success, msg = download_and_import_paper(paper_info, selected_analysis_model_id)
+                                if success:
+                                    success_count += 1
+                                    st.toast(f"✅ {paper_info.get('title')[:15]} 导入成功")
+                                else:
+                                    st.error(f"❌ 导入失败 《{paper_info.get('title')[:15]}》: {msg}")
+                                    
+                                progress_bar.progress((i + 1) / len(selected_indices))
+                                
+                            status_text.empty()
+                            if success_count > 0:
+                                st.success(f"🎉 成功完成 {success_count} 篇黄金文献的下载、入库与大模型剖析！")
+                                if "unanalyzed_papers" in st.session_state:
+                                    del st.session_state["unanalyzed_papers"]
+                                st.rerun()
 
     # 历史归档列表
     st.markdown("---")
@@ -669,16 +805,144 @@ with tab_model_search:
                     st.markdown(f"**🔍 技术主题**: `{arc['query']}`")
                     st.caption(f"📅 归档时间: `{arc['archived_at']}` &nbsp;|&nbsp; 🆔 归档编号: `{arc['archive_id']}`")
                 with col_arc_btn1:
-                    if st.button("📂 载入查看", key=f"load_arc_{arc['archive_id']}", use_container_width=True):
+                    if st.button("📂 载入查看", key=f"load_arc_{arc['archive_id']}", width="stretch"):
                         import json
-                        st.session_state["model_search_results"] = json.loads(arc["results_json"])
-                        st.session_state["model_search_query_used"] = arc["query"]
-                        st.rerun()
+                        try:
+                            parsed_res = json.loads(arc["results_json"])
+                            # 判定是本地检索结果、联网检索结果V2还是旧版List
+                            if isinstance(parsed_res, dict) and "candidates" in parsed_res:
+                                st.session_state["local_search_results"] = parsed_res
+                                st.session_state["local_search_query_used"] = arc["query"]
+                                if "model_search_results_v2" in st.session_state:
+                                    st.session_state["model_search_results_v2"] = None
+                            elif isinstance(parsed_res, dict) and "answer" in parsed_res:
+                                st.session_state["model_search_results_v2"] = parsed_res
+                                st.session_state["model_search_query_used"] = arc["query"]
+                                if "local_search_results" in st.session_state:
+                                    st.session_state["local_search_results"] = None
+                            else:
+                                # 兼容旧版 list
+                                st.session_state["model_search_results_v2"] = parsed_res
+                                st.session_state["model_search_query_used"] = arc["query"]
+                                if "local_search_results" in st.session_state:
+                                    st.session_state["local_search_results"] = None
+                            st.rerun()
+                        except Exception as parse_err:
+                            st.error(f"无法解析该归档数据: {parse_err}")
                 with col_arc_btn2:
-                    if st.button("🗑️ 移除归档", key=f"del_arc_{arc['archive_id']}", use_container_width=True):
+                    if st.button("🗑️ 移除归档", key=f"del_arc_{arc['archive_id']}", width="stretch"):
                         delete_search_archive(arc["archive_id"])
                         st.toast("🗑️ 归档已成功删除")
                         st.rerun()
+
+with tab_local_search:
+    st.subheader("🔎 本地文献大仓双路检索")
+    st.markdown("该模块专用于**纯本地大仓资产检索与事实问答**。系统将仅在本地数据湖（SQLite + LanceDB）中执行 FTS5 和向量混合检索，经 Rerank 后由 AI 进行事实解说合成，**100% 物理隔绝互联网请求，0 商业打捞开销**。")
+    
+    if "local_search_results" not in st.session_state:
+        st.session_state["local_search_results"] = None
+    if "local_search_query_used" not in st.session_state:
+        st.session_state["local_search_query_used"] = ""
+
+    # 配置区
+    with st.container(border=True):
+        col_local_query, col_local_filter = st.columns([3, 2])
+        with col_local_query:
+            local_query = st.text_input(
+                "输入本地检索与提问 Query", 
+                value="", 
+                placeholder="例如: vLLM KV Cache, CXL memory numa-aware...",
+                key="local_search_query_input_text"
+            )
+        with col_local_filter:
+            local_filters = st.multiselect(
+                "筛选本地数据源",
+                options=["arxiv_paper", "local_pdf", "ext_blog", "daily_brief", "weekly_insight"],
+                default=["arxiv_paper", "local_pdf", "ext_blog", "daily_brief"],
+                format_func=lambda x: {
+                    "arxiv_paper": "📚 学术论文",
+                    "local_pdf": "📂 本地大仓 PDF",
+                    "ext_blog": "🌐 技术博客/网页",
+                    "daily_brief": "📰 每日快讯",
+                    "weekly_insight": "📊 每周洞察周报"
+                }.get(x, x),
+                key="local_search_filter_multiselect"
+            )
+
+        trigger_local_search = st.button("🔎 启动本地大仓混合检索", type="primary", width="stretch")
+
+    if trigger_local_search:
+        if not local_query.strip():
+            st.warning("⚠️ 请输入有效的检索 Query。")
+        elif not local_filters:
+            st.warning("⚠️ 请至少选择一个本地数据源。")
+        else:
+            with st.spinner("正在启动本地大仓双路混合检索与重排..."):
+                import asyncio
+                from core.search_engine import api_search
+                try:
+                    res = asyncio.run(api_search(
+                        query=local_query.strip(),
+                        filter_type=local_filters,
+                        routing_mode="retrieve_rerank",
+                        model_id=selected_online_search_model_id
+                    ))
+                    
+                    if res.get("status") == "success":
+                        st.session_state["local_search_results"] = {
+                            "candidates": res.get("candidates", []),
+                            "query": local_query.strip()
+                        }
+                        st.session_state["local_search_query_used"] = local_query.strip()
+                        st.toast("🟢 本地大仓检索与重排成功！")
+                    else:
+                        st.error(f"🔴 检索失败: {res.get('error', '未知错误')}")
+                except Exception as e:
+                    st.error(f"❌ 运行本地大仓检索发生异常: {e}")
+
+    # 显示本地检索结果
+    l_res = st.session_state.get("local_search_results")
+    if l_res is not None:
+        st.markdown("---")
+        st.markdown(f"##### 📚 本地大仓检索候选结果 — `{l_res['query']}`")
+        
+        candidates = l_res.get("candidates", [])
+        if not candidates:
+            st.info("💡 未检索到任何匹配的本地大仓候选数据。")
+        else:
+            for idx, ev in enumerate(candidates):
+                with st.container(border=True):
+                    title_str = ev.get("title", "无标题")
+                    url_str = format_evidence_url(ev.get("canonical_url", "#"))
+                    doc_id = ev.get("doc_id", "unknown")
+                    hybrid_score = ev.get("hybrid_score", 0.0)
+                    rerank_score = ev.get("rerank_score", 0.0)
+                    stype = ev.get("source_type", "unknown")
+                    
+                    stype_name = {
+                        "arxiv_paper": "📚 学术论文",
+                        "local_pdf": "📂 本地大仓 PDF",
+                        "ext_blog": "🌐 技术博客/网页",
+                        "daily_brief": "📰 每日快讯",
+                        "weekly_insight": "📊 每周洞察周报"
+                    }.get(stype, stype)
+                    
+                    badge_html = f"<span style='background-color:#E0F2FE; color:#0369A1; padding:2px 8px; border-radius:4px; font-size:0.75rem; font-weight:bold; margin-right:8px;'>{stype_name}</span>"
+                    
+                    st.markdown(f"**[{idx+1}]** {badge_html} **[{doc_id}]** [{title_str}]({url_str})", unsafe_allow_html=True)
+                    st.caption(f"📍 章节/位置: `{ev.get('section_path', 'N/A')}` &nbsp;|&nbsp; 📄 页码: `p.{ev.get('page_number', '1')}` &nbsp;|&nbsp; 📈 混合检索得分: `{hybrid_score:.4f}` &nbsp;|&nbsp; 🔄 重排得分: `{rerank_score:.4f}`")
+                    st.markdown(f"<div style='font-size: 0.9rem; color: #374151; background-color: #F9FAFB; padding: 12px; border-radius: 8px; border-left: 4px solid #10B981; line-height: 1.6;'>{ev.get('text', '')}</div>", unsafe_allow_html=True)
+                    
+            # 归档按钮
+            st.markdown("---")
+            if st.button("🗄️ 归档本次本地检索历史", width="stretch"):
+                import json
+                import uuid
+                archive_id = f"arc_{uuid.uuid4().hex[:8]}"
+                results_json = json.dumps(l_res, ensure_ascii=False)
+                insert_search_archive(archive_id, l_res["query"], results_json)
+                st.success("🎉 本次本地检索历史已成功归档到本地数据库！")
+                st.rerun()
 
 with tab_scheduler:
     st.subheader("⏰ 智能定时扫描与解构调度")
@@ -815,7 +1079,7 @@ with tab_briefings:
         st.markdown("### 🚀 自动探测与手动收割")
         
         # 立即抓取按钮
-        if st.button("📰 立即抓取今日简报 (TOP 10)", use_container_width=True, help="立即检索过去24小时并生成硬核科技简报"):
+        if st.button("📰 立即抓取今日简报 (TOP 10)", width="stretch", help="立即检索过去24小时并生成硬核科技简报"):
             with st.spinner("🚀 正在强联网检索并进行第一性原理剖析中..."):
                 success, result = generate_daily_briefing_manually()
                 if success:
@@ -824,7 +1088,7 @@ with tab_briefings:
                 else:
                     st.error(f"❌ 抓取失败: {result}")
                     
-        if st.button("🔍 立即抓取每周技术深入洞察", use_container_width=True, help="立即深入剖析过去一周底层技术亮点"):
+        if st.button("🔍 立即抓取每周技术深入洞察", width="stretch", help="立即深入剖析过去一周底层技术亮点"):
             with st.spinner("🚀 正在强联网检索底物理突破并进行冷酷批判中..."):
                 success, result = generate_weekly_insight_manually()
                 if success:
@@ -855,8 +1119,8 @@ with tab_briefings:
             )
             
             # 测试连通性按钮
-            if st.button("⚡ 测试简报大脑连通性", key="test_briefing_api_btn", use_container_width=True):
-                resolved_key = masked_key.strip() if masked_key.strip() else os.environ.get("GEMINI_API_KEY", "").strip()
+            if st.button("⚡ 测试简报大脑连通性", key="test_briefing_api_btn", width="stretch"):
+                resolved_key = masked_key.strip() if masked_key.strip() else get_env_var("GEMINI_API_KEY", "").strip()
                 if not resolved_key:
                     st.error("🔴 连通性测试失败！未配置 API Key，且未检测到系统环境变量。")
                 else:
@@ -893,7 +1157,7 @@ with tab_briefings:
             )
             
             # 保存独立配置按钮
-            if st.button("💾 保存专属配置与调度设定", key="save_briefing_config_btn", use_container_width=True):
+            if st.button("💾 保存专属配置与调度设定", key="save_briefing_config_btn", width="stretch"):
                 # 时间格式校验
                 time_pattern = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
                 if not time_pattern.match(daily_time_str.strip()) or not time_pattern.match(weekly_time_str.strip()):
@@ -1036,29 +1300,70 @@ with tab_global_config:
             format_func=lambda x: "概要 (Summary - 快速学术解构)" if x == "summary" else "完整 (Detailed - 异构计算硬件深度剖析)",
             help="概要一档提供精炼辩证摘要；完整一档提供针对微架构、总线带宽、Host 内核与异构算力的超级硬核解构白皮书。"
         )
+
+        st.markdown("##### 🪙 商业 API 开销限制 (硬熔断配额)")
+        
+        daily_budget = st.number_input(
+            "每日 API 消费限额 (美元)",
+            min_value=0.1,
+            max_value=100.0,
+            value=float(current_settings.get("daily_budget", 2.0)),
+            step=0.1,
+            help="限制每日商业付费 API 调用总额，超出此额度将自动熔断付费接口。"
+        )
+        
+        weekly_budget = st.number_input(
+            "每周 API 消费限额 (美元)",
+            min_value=0.5,
+            max_value=500.0,
+            value=float(current_settings.get("weekly_budget", 10.0)),
+            step=0.5,
+            help="限制每周商业付费 API 调用总额，超出此额度将自动熔断付费接口。"
+        )
         
         st.markdown("---")
         st.markdown("### 🤖 系统AI脑区分配与兼容性诊断")
         
         model_keys = list(api_models.keys())
         
-        # 1. 文献阅读与解构大脑
+        # 1. 论文摘要相关性分析大脑
         default_model_id = get_default_model()
-        default_index = model_keys.index(default_model_id) if default_model_id in model_keys else 0
+        current_relevance_brain = current_settings.get("abstract_relevance_model_id", default_model_id)
+        relevance_index = model_keys.index(current_relevance_brain) if current_relevance_brain in model_keys else 0
+
+        selected_relevance_brain = st.selectbox(
+            "🧪 1. 论文摘要相关性分析大脑",
+            options=model_keys,
+            index=relevance_index,
+            format_func=lambda x: api_models[x].get("name", x),
+            key="config_abstract_relevance_brain",
+            help="用于双阶段漏斗第二阶段：读取候选论文 Title / Abstract，判断是否与当前技术方向强相关。"
+        )
+
+        relevance_cfg = api_models.get(selected_relevance_brain, {})
+        relevance_provider = relevance_cfg.get("provider", "")
+        if relevance_provider in ["gemini", "openai_compatible"]:
+            st.markdown("<p style='color: green; font-size: 0.88rem; margin-top: -10px; margin-bottom: 15px;'>🟢 兼容 (摘要语义仲裁可用)</p>", unsafe_allow_html=True)
+        else:
+            st.markdown("<p style='color: red; font-size: 0.88rem; margin-top: -10px; margin-bottom: 15px;'>🔴 不兼容 (未知 API 协议)</p>", unsafe_allow_html=True)
+
+        # 2. 论文精细化分析大脑
+        current_detailed_brain = current_settings.get("detailed_analysis_model_id", default_model_id)
+        detailed_index = model_keys.index(current_detailed_brain) if current_detailed_brain in model_keys else (model_keys.index(default_model_id) if default_model_id in model_keys else 0)
         
         col_read_sel, col_test_btn = st.columns([2.5, 1.2])
         with col_read_sel:
             selected_active_reading_brain = st.selectbox(
-                "🧠 1. 文献阅读与解构大脑",
+                "🧠 2. 论文精细化分析大脑",
                 options=model_keys,
-                index=default_index,
+                index=detailed_index,
                 format_func=lambda x: api_models[x].get("name", x),
                 key="config_active_reading_brain",
-                help="系统首选的文献深度阅读与辩证解构大模型大脑。"
+                help="用于本地 PDF 全文精读、生成辩证解构报告和写入本地沉淀文献大仓。"
             )
         with col_test_btn:
             st.markdown("<div style='padding-top: 28px;'></div>", unsafe_allow_html=True)
-            test_triggered = st.button("⚡ 测试连通性", key="config_test_brain_btn", use_container_width=True)
+            test_triggered = st.button("⚡ 测试连通性", key="config_test_brain_btn", width="stretch")
             
         read_cfg = api_models.get(selected_active_reading_brain, {})
         read_provider = read_cfg.get("provider", "")
@@ -1076,11 +1381,11 @@ with tab_global_config:
                 else:
                     st.error(f"🔴 **连通性测试失败！**\n\n{message}")
                     
-        # 2. AI 联网学术探测大脑
+        # 3. AI 联网学术探测大脑
         current_search_brain = current_settings.get("search_model_id", "")
         search_index = model_keys.index(current_search_brain) if current_search_brain in model_keys else 0
         selected_search_brain = st.selectbox(
-            "🔍 2. AI 联网学术探测大脑",
+            "🔍 3. AI 联网学术探测大脑",
             options=model_keys,
             index=search_index,
             format_func=lambda x: api_models[x].get("name", x),
@@ -1095,7 +1400,7 @@ with tab_global_config:
         else:
             st.markdown("<p style='color: red; font-size: 0.88rem; margin-top: -10px; margin-bottom: 15px;'>🔴 不兼容 (不支持 responses 终结点，请配置百炼兼容模式 Responses API)</p>", unsafe_allow_html=True)
             
-        # 3. 24小时雷达简报大脑
+        # 4. 24小时雷达简报大脑
         br_config = load_briefing_config()
         current_briefing_brain = br_config.get("model_name", "")
         # briefing_config.json 中的 model_name 可能是接口模型 ID，我们需要匹配 api_models 中的 ID
@@ -1106,7 +1411,7 @@ with tab_global_config:
                 break
                 
         selected_briefing_brain = st.selectbox(
-            "🌐 3. 24小时雷达简报大脑",
+            "🌐 4. 24小时雷达简报大脑",
             options=model_keys,
             index=briefing_index,
             format_func=lambda x: api_models[x].get("name", x),
@@ -1122,12 +1427,16 @@ with tab_global_config:
             st.markdown("<p style='color: red; font-size: 0.88rem; margin-top: -10px; margin-bottom: 25px;'>🔴 不兼容 (简报引擎依赖 Google Search Grounding，当前非 Gemini 模型将不可用)</p>", unsafe_allow_html=True)
             
         # 统一保存按钮
-        if st.button("💾 保存全局控制参数与大脑分配", key="save_global_all_btn", use_container_width=True):
+        if st.button("💾 保存全局控制参数与大脑分配", key="save_global_all_btn", width="stretch"):
             updated_settings = {
                 "max_concurrent_analysis": max_concurrent,
                 "max_papers_per_batch": max_batch_papers,
                 "analysis_granularity": selected_granularity,
-                "search_model_id": selected_search_brain
+                "abstract_relevance_model_id": selected_relevance_brain,
+                "detailed_analysis_model_id": selected_active_reading_brain,
+                "search_model_id": selected_search_brain,
+                "daily_budget": daily_budget,
+                "weekly_budget": weekly_budget
             }
             
             success_all = True
@@ -1147,7 +1456,7 @@ with tab_global_config:
                 if not gemini_key:
                     env_var = briefing_cfg.get("api_key_env", "")
                     if env_var:
-                        gemini_key = os.environ.get(env_var, "").strip()
+                        gemini_key = get_env_var(env_var, "").strip()
                 if gemini_key:
                     br_config["gemini_api_key"] = gemini_key
             
@@ -1223,3 +1532,104 @@ with tab_global_config:
                     if delete_model_config(selected_edit_model):
                         st.success(f"🗑️ 模型 {selected_edit_model} 已从大仓中安全注销并移除！")
                         st.rerun()
+
+    # --- 📊 API 计费审计与滑动配额对账明细 ---
+    st.markdown("---")
+    st.markdown("### 📊 API 计费审计与滑动配额对账明细")
+    
+    # 获取当前的费用统计
+    try:
+        conn = get_db_connection()
+        # 1. 计算今日累计开销
+        day_cost = conn.execute("SELECT SUM(cost_usd) FROM quota_ledger WHERE created_at >= datetime('now', 'start of day')").fetchone()[0] or 0.0
+        # 2. 计算本周累计开销
+        week_cost = conn.execute("SELECT SUM(cost_usd) FROM quota_ledger WHERE created_at >= datetime('now', '-7 days')").fetchone()[0] or 0.0
+        
+        # 3. 按提供商汇总
+        provider_summary = conn.execute("""
+            SELECT api_provider, 
+                   SUM(cost_usd) as total_cost, 
+                   SUM(tokens_in) as total_in, 
+                   SUM(tokens_out) as total_out, 
+                   SUM(credits_spent) as total_credits
+            FROM quota_ledger 
+            GROUP BY api_provider
+        """).fetchall()
+        
+        # 4. 获取最近 15 条流水账单
+        recent_ledgers = conn.execute("""
+            SELECT api_provider, model_name, api_metric, tokens_in, tokens_out, credits_spent, cost_usd, created_at, request_payload_summary 
+            FROM quota_ledger 
+            ORDER BY created_at DESC 
+            LIMIT 15
+        """).fetchall()
+        
+        conn.close()
+    except Exception as e:
+        day_cost = 0.0
+        week_cost = 0.0
+        provider_summary = []
+        recent_ledgers = []
+        st.error(f"无法读取计费明细: {e}")
+        
+    # 展示今日/本周配额
+    col_day_budget, col_week_budget = st.columns(2)
+    
+    with col_day_budget:
+        day_limit = float(current_settings.get("daily_budget", 2.0))
+        day_pct = min(100.0, (day_cost / day_limit * 100.0)) if day_limit > 0 else 0.0
+        st.metric(
+            "今日累计 API 消费", 
+            f"${day_cost:.4f}", 
+            delta=f"配额: ${day_limit:.2f}",
+            delta_color="off"
+        )
+        st.progress(day_pct / 100.0, text=f"今日配额已使用 {day_pct:.1f}%")
+        
+    with col_week_budget:
+        week_limit = float(current_settings.get("weekly_budget", 10.0))
+        week_pct = min(100.0, (week_cost / week_limit * 100.0)) if week_limit > 0 else 0.0
+        st.metric(
+            "本周 (滑动7天) 累计 API 消费", 
+            f"${week_cost:.4f}", 
+            delta=f"配额: ${week_limit:.2f}",
+            delta_color="off"
+        )
+        st.progress(week_pct / 100.0, text=f"本周配额已使用 {week_pct:.1f}%")
+        
+    st.markdown("##### 🔌 各 API 渠道开销汇总")
+    if not provider_summary:
+        st.info("💡 暂无任何计费记录。")
+    else:
+        summary_cols = st.columns(len(provider_summary))
+        for idx, row in enumerate(provider_summary):
+            with summary_cols[idx]:
+                with st.container(border=True):
+                    st.markdown(f"**{row['api_provider'].upper()}**")
+                    st.markdown(f"**累计开销**: `${row['total_cost']:.4f}`")
+                    if row['total_credits'] > 0:
+                        st.caption(f"消耗积分: `{row['total_credits']}`")
+                    else:
+                        st.caption(f"Tokens: `输入 {row['total_in']} / 输出 {row['total_out']}`")
+                        
+    with st.expander("📝 查看最近 15 笔 API 对账明细", expanded=False):
+        if not recent_ledgers:
+            st.info("💡 无账单流水。")
+        else:
+            # 格式化表格显示
+            import pandas as pd
+            table_data = []
+            for row in recent_ledgers:
+                table_data.append({
+                    "时间": row["created_at"],
+                    "提供商": row["api_provider"],
+                    "模型/服务": row["model_name"],
+                    "指标": row["api_metric"],
+                    "输入 Tokens": row["tokens_in"],
+                    "输出 Tokens": row["tokens_out"],
+                    "消耗积分": row["credits_spent"],
+                    "花费 (USD)": f"${row['cost_usd']:.4f}",
+                    "请求描述": row["request_payload_summary"]
+                })
+            df = pd.DataFrame(table_data)
+            st.dataframe(df, width="stretch", hide_index=True)

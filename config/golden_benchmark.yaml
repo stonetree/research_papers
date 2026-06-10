@@ -1,0 +1,215 @@
+version: '1.1'
+cases:
+- query_id: TC-001
+  query: TopoClaw Human Centric Topology Aware Agent Operating System
+  query_type: microarchitecture
+  expected_positives:
+  - doc_id: migrated_2605_15556
+    target_chunk_ids:
+    - chunk_migrated_2605_15556_0
+    - chunk_migrated_2605_15556_1
+- query_id: TC-002
+  query: HybridGen CPU GPU Hybrid Computing LLM Generative Inference Volume Velocity
+    FlexGen
+  query_type: microarchitecture
+  expected_positives:
+  - doc_id: migrated_2604_18529
+    target_chunk_ids:
+    - chunk_migrated_2604_18529_0
+    - chunk_migrated_2604_18529_3
+- query_id: TC-003
+  query: CXL SpecKV FPGA Speculative KV Cache Datacenter Serving
+  query_type: microarchitecture
+  expected_positives:
+  - doc_id: migrated_2512_11920
+    target_chunk_ids:
+    - chunk_migrated_2512_11920_0
+- query_id: TC-004
+  query: Beluga CXL Based Memory Architecture LLM KVCache Management
+  query_type: microarchitecture
+  expected_positives:
+  - doc_id: migrated_2511_20172
+    target_chunk_ids:
+    - chunk_migrated_2511_20172_0
+- query_id: TC-005
+  query: Scalable Processing Near Memory 1M Token LLM Inference CXL
+  query_type: microarchitecture
+  expected_positives:
+  - doc_id: migrated_2511_00321
+    target_chunk_ids:
+    - chunk_migrated_2511_00321_0
+- query_id: TC-006
+  query: TRACE CXL Bandwidth Lossless Compression Precision Scaling
+  query_type: microarchitecture
+  expected_positives:
+  - doc_id: migrated_2509_03377
+    target_chunk_ids:
+    - chunk_migrated_2509_03377_0
+- query_id: TC-007
+  query: Formalising CXL Cache Coherence Coherency Pipeline
+  query_type: microarchitecture
+  expected_positives:
+  - doc_id: migrated_99e3d4a9
+    target_chunk_ids:
+    - chunk_migrated_99e3d4a9_0
+- query_id: TC-008
+  query: DUAL BLADE NVMe Direct KV Cache Offloading Edge Inference
+  query_type: microarchitecture
+  expected_positives:
+  - doc_id: migrated_2604_26557
+    target_chunk_ids:
+    - chunk_migrated_2604_26557_0
+- query_id: TC-009
+  query: HillInfer Long Context Edge Hierarchical KV Eviction SmartSSD
+  query_type: microarchitecture
+  expected_positives:
+  - doc_id: migrated_2602_18750
+    target_chunk_ids:
+    - chunk_migrated_2602_18750_0
+- query_id: TC-010
+  query: MultiPath Memory Access Host GPU Bandwidth Bottlenecks
+  query_type: microarchitecture
+  expected_positives:
+  - doc_id: migrated_2512_16056
+    target_chunk_ids:
+    - chunk_migrated_2512_16056_0
+- query_id: TC-011
+  query: Serving LLM Inference KV Offloading Bottlenecks
+  query_type: microarchitecture
+  expected_positives:
+  - doc_id: migrated_2601_19910
+    target_chunk_ids:
+    - chunk_migrated_2601_19910_0
+- query_id: TC-012
+  query: Agentic AI Ecosystems in Higher Education Multi Agent
+  query_type: long_tail_semantic
+  expected_positives:
+  - doc_id: migrated_2605_14266
+    target_chunk_ids:
+    - chunk_migrated_2605_14266_0
+- query_id: TC-013
+  query: PCIe CPU 侧 向量数据库 传输 数据 GPU 侧 推理延迟 思考时间 5-20秒 小于2秒
+  query_type: long_tail_semantic
+  expected_positives:
+  - doc_id: migrated_2605_14266
+    target_chunk_ids:
+    - chunk_migrated_2605_14266_6
+- query_id: TC-014
+  query: CPU GPU local memory Softmax K vectors logit
+  query_type: long_tail_semantic
+  expected_positives:
+  - doc_id: migrated_2604_18529
+    target_chunk_ids:
+    - chunk_migrated_2604_18529_2
+- query_id: TC-015
+  query: 上下文窗口 Context Window 瓶颈 幻觉 Hallucination
+  query_type: long_tail_semantic
+  expected_positives:
+  - doc_id: migrated_2605_14266
+    target_chunk_ids:
+    - chunk_migrated_2605_14266_1
+- query_id: TC-016
+  query: Knowledge Layer vector database relational database knowledge graph
+  query_type: long_tail_semantic
+  expected_positives:
+  - doc_id: migrated_2605_14266
+    target_chunk_ids:
+    - chunk_migrated_2605_14266_2
+- query_id: TC-017
+  query: flexgen offload GPU computation Moe Lightning
+  query_type: long_tail_semantic
+  expected_positives:
+  - doc_id: migrated_2604_18529
+    target_chunk_ids:
+    - chunk_migrated_2604_18529_4
+- query_id: TC-018
+  query: Full Scheduler Fixed K Pruning performance
+  query_type: long_tail_semantic
+  expected_positives:
+  - doc_id: migrated_2604_18529
+    target_chunk_ids:
+    - chunk_migrated_2604_18529_5
+- query_id: TC-019
+  query: CXL 链路 QoS 保证 性能退化 memkind numa-aware
+  query_type: long_tail_semantic
+  expected_positives:
+  - doc_id: migrated_2604_18529
+    target_chunk_ids:
+    - chunk_migrated_2604_18529_7
+- query_id: TC-020
+  query: GQA MQA 变体 并行化逻辑 KV 管理 适配 HybridGen DRAM CXL
+  query_type: long_tail_semantic
+  expected_positives:
+  - doc_id: migrated_2604_18529
+    target_chunk_ids:
+    - chunk_migrated_2604_18529_8
+- query_id: TC-021
+  query: device topology social relationship space skill cross boundary execution
+  query_type: long_tail_semantic
+  expected_positives:
+  - doc_id: migrated_2605_15556
+    target_chunk_ids:
+    - chunk_migrated_2605_15556_2
+- query_id: TC-022
+  query: Inclusive Learning inclusive multi agent AI teaching
+  query_type: cross_lingual
+  expected_positives:
+  - doc_id: migrated_2605_14266
+    target_chunk_ids:
+    - chunk_migrated_2605_14266_0
+- query_id: TC-023
+  query: CPU work hidden behind GPU work scheduler
+  query_type: cross_lingual
+  expected_positives:
+  - doc_id: migrated_2604_18529
+    target_chunk_ids:
+    - chunk_migrated_2604_18529_3
+- query_id: TC-024
+  query: student special learning style bias model SEN data
+  query_type: cross_lingual
+  expected_positives:
+  - doc_id: migrated_2605_14266
+    target_chunk_ids:
+    - chunk_migrated_2605_14266_5
+- query_id: TC-025
+  query: Multi Agent Chaining Latency response time
+  query_type: cross_lingual
+  expected_positives:
+  - doc_id: migrated_2605_14266
+    target_chunk_ids:
+    - chunk_migrated_2605_14266_7
+- query_id: TC-026
+  query: inclusive inclusive learning multi agent framework learning
+  query_type: cross_lingual
+  expected_positives:
+  - doc_id: migrated_2605_14266
+    target_chunk_ids:
+    - chunk_migrated_2605_14266_0
+- query_id: TC-027
+  query: TopoClaw human centric topology aware Agent OS
+  query_type: cross_lingual
+  expected_positives:
+  - doc_id: migrated_2605_15556
+    target_chunk_ids:
+    - chunk_migrated_2605_15556_0
+- query_id: TC-028
+  query: Context Window 瓶颈 幻觉 任务分解 角色定制化
+  query_type: cross_lingual
+  expected_positives:
+  - doc_id: migrated_2605_14266
+    target_chunk_ids:
+    - chunk_migrated_2605_14266_1
+- query_id: TC-029
+  query: 向量数据库 传输 数据 PCIe GPU 侧 延迟 思考时间 5-20秒 小于2秒
+  query_type: cross_lingual
+  expected_positives:
+  - doc_id: migrated_2605_14266
+    target_chunk_ids:
+    - chunk_migrated_2605_14266_6
+- query_id: TC-030
+  query: Agentic AI Ecosystems in Higher Education 自动评分 聊天机器人 学习分析仪表盘
+  query_type: cross_lingual
+  expected_positives:
+  - doc_id: migrated_2605_14266
+    target_chunk_ids:
+    - chunk_migrated_2605_14266_0

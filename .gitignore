@@ -44,3 +44,5 @@ config/briefing_config.json
 
 # Ignore local databases and downloaded PDF documents
 storage/
+tmp_lancedb/
+system_design/

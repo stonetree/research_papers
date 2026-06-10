@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import json
+from .env_helper import get_env_var
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "api_config.json")
 
@@ -12,7 +13,12 @@ def load_raw_config():
             "_global_settings": {
                 "max_concurrent_analysis": 2,
                 "max_papers_per_batch": 3,
-                "analysis_granularity": "summary"  # 'summary' (概要) 或 'detailed' (完整)
+                "analysis_granularity": "summary",  # 'summary' (概要) 或 'detailed' (完整)
+                "abstract_relevance_model_id": "deepseek-v4",
+                "detailed_analysis_model_id": "deepseek-v4",
+                "search_model_id": "deepseek-v4",
+                "daily_budget": 2.0,
+                "weekly_budget": 10.0
             },
             "deepseek-v4": {
                 "name": "DeepSeek-V4 (高性能推理)",
@@ -49,6 +55,18 @@ def load_raw_config():
                     "max_papers_per_batch": 3,
                     "analysis_granularity": "summary"
                 }
+            defaults = {
+                "max_concurrent_analysis": 2,
+                "max_papers_per_batch": 3,
+                "analysis_granularity": "summary",
+                "abstract_relevance_model_id": data.get("_default_model", "deepseek-v4"),
+                "detailed_analysis_model_id": data.get("_default_model", "deepseek-v4"),
+                "search_model_id": data.get("_default_model", "deepseek-v4"),
+                "daily_budget": 2.0,
+                "weekly_budget": 10.0
+            }
+            for key, value in defaults.items():
+                data["_global_settings"].setdefault(key, value)
             return data
     except Exception as e:
         print(f"读取 API 配置文件失败: {e}")
@@ -86,7 +104,12 @@ def get_global_settings():
     return raw.get("_global_settings", {
         "max_concurrent_analysis": 2,
         "max_papers_per_batch": 3,
-        "analysis_granularity": "summary"
+        "analysis_granularity": "summary",
+        "abstract_relevance_model_id": raw.get("_default_model", "deepseek-v4"),
+        "detailed_analysis_model_id": raw.get("_default_model", "deepseek-v4"),
+        "search_model_id": raw.get("_default_model", "deepseek-v4"),
+        "daily_budget": 2.0,
+        "weekly_budget": 10.0
     })
 
 def update_global_settings(settings):
@@ -132,7 +155,7 @@ def get_model_config(model_id):
     if not api_key:
         env_var = cfg.get("api_key_env", "")
         if env_var:
-            api_key = os.environ.get(env_var, "").strip()
+            api_key = get_env_var(env_var, "").strip()
             
     resolved_cfg = cfg.copy()
     resolved_cfg["resolved_api_key"] = api_key

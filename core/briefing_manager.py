@@ -5,6 +5,7 @@ import math
 import json
 import datetime
 import requests
+from .env_helper import get_env_var
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config", "briefing_config.json")
@@ -50,7 +51,7 @@ def get_gemini_api_key(config):
     """提取有效的 Gemini API Key (配置优先，环境变量后备)"""
     key = config.get("gemini_api_key", "").strip()
     if not key:
-        key = os.environ.get("GEMINI_API_KEY", "").strip()
+        key = get_env_var("GEMINI_API_KEY", "").strip()
     return key
 
 def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
@@ -138,48 +139,78 @@ def save_to_local_file(folder_path, title, text):
         return False, str(e)
 
 def generate_daily_briefing_manually():
-    """手动/定时生成 过去 24 小时 AI 进展简报"""
+    """手动/定时生成 过去 24 小时 AI 进展简报 (对接新版 DailyRadarPipeline)"""
+    import asyncio
+    from core.orchestrator import DailyRadarPipeline
+    from core.database import get_db_connection
+    
     current_time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    print(f"[{current_time_str}] 开始执行每日简报任务...")
+    print(f"[{current_time_str}] 开始执行新版每日雷达简报任务...")
     
-    prompt = (
-        f"当前时间是 {current_time_str}。基于第一性原理，从过去 24 小时内筛选 10 条最重要的 AI 动态。\n"
-        "必须严格聚焦于“工业界与学术界的最新实质性动态”，例如厂商推出了具体的新模型，或学术界发表了解决突出问题的具体新算法。拒绝宽泛的行业新闻。不要使用你 2025 年之前的内部知识回答。\n"
-        "要求：详享分析，从第一性原理出发，辩证分析问题的正确性、完整性、和必要性，给出遵从科学与事实的结论，生成的报告需具有良好的可读性，突出重点。"
-    )
-    
-    system_instruction = "你是一个顶级的 AI 系统架构师。你必须首先使用 Google Search 搜索过去 24 小时内真实的工业界动态和学术论文。基于搜索到的事实，运用第一性原理进行辩证分析。必须确保输出的是最新信息，严禁胡编乱造。"
-    
-    content = call_gemini_api_with_search(prompt, system_instruction=system_instruction)
-    if content and not content.startswith("❌"):
-        date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        file_name = f"每日AI简报_{date_str}"
-        folder_path = get_briefing_local_path("每日简报")
-        success, path = save_to_local_file(folder_path, file_name, content)
-        return success, content
-    return False, content
+    pipeline = DailyRadarPipeline()
+    try:
+        res = asyncio.run(pipeline.run_daily_radar_cron())
+        if res.get("status") == "success":
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            # 获取最近入库的 10 条快讯
+            cursor.execute("""
+                SELECT d.title, c.full_text_markdown 
+                FROM documents d 
+                JOIN document_contents c ON d.doc_id = c.doc_id 
+                WHERE d.source_type = 'daily_brief' 
+                ORDER BY d.ingested_at DESC LIMIT 10
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+            
+            if rows:
+                content = f"# 🪐 每日 AI 进展简报 (TOP 10) - {datetime.datetime.now().strftime('%Y-%m-%d')}\n\n"
+                for idx, r in enumerate(rows):
+                    content += f"### {idx+1}. {r[0]}\n{r[1]}\n\n"
+                    
+                date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                file_name = f"每日AI简报_{date_str}"
+                folder_path = get_briefing_local_path("每日简报")
+                success, path = save_to_local_file(folder_path, file_name, content)
+                return success, content
+        return False, res.get("error", "未抓取到有效快讯")
+    except Exception as e:
+        print(f"每日简报执行失败: {e}")
+        return False, str(e)
 
 def generate_weekly_insight_manually():
-    """手动/定时生成 过去一周 AI 技术深入洞察"""
+    """手动/定时生成 过去一周 AI 技术深入洞察 (对接新版 WeeklyInsightPipeline)"""
+    import asyncio
+    from core.weekly_insight import WeeklyInsightPipeline
+    from core.database import get_db_connection
+    
     current_time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    print(f"[{current_time_str}] 开始执行每周洞察任务...")
+    print(f"[{current_time_str}] 开始执行新版每周技术洞察任务...")
     
-    prompt = (
-        f"当前时间是 {current_time_str}。根据第一性原理，聚焦上周（过去7天） AI 领域“最新的技术亮点与硬核突破”（如架构的底层革新、推理算法的数学突破、硬件指令集的更新）。不要使用你 2025 年之前的内部知识回答。\n"
-        "严禁对一般技术进行泛泛而谈，必须进行深度辩证分析。\n"
-        "要求：详尽分析，从第一性原理出发，辩证分析问题的正确性、完整性、和必要性，给出遵从科学与事实的结论，生成的报告需具有良好的可读性，结构清晰，重点突出。"
-    )
-    
-    system_instruction = "你是一个顶级的 AI 系统架构师。你必须首先使用 Google Search 搜索过去一周（7天）内真实的工业界动态和学术论文。基于搜索到的事实，运用第一性原理进行辩证分析。必须确保输出的是最新信息，严禁胡编乱造。"
-    
-    content = call_gemini_api_with_search(prompt, system_instruction=system_instruction)
-    if content and not content.startswith("❌"):
-        date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        file_name = f"每周AI洞察_{date_str}"
-        folder_path = get_briefing_local_path("每周洞察报告")
-        success, path = save_to_local_file(folder_path, file_name, content)
-        return success, content
-    return False, content
+    pipeline = WeeklyInsightPipeline()
+    try:
+        res = asyncio.run(pipeline.run_weekly_synthesis_pipeline())
+        if res.get("status") == "success":
+            doc_id = res["doc_id"]
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT full_text_markdown FROM document_contents WHERE doc_id = ?", (doc_id,))
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                content = row[0]
+                date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+                file_name = f"每周AI洞察_{date_str}"
+                folder_path = get_briefing_local_path("每周洞察报告")
+                success, path = save_to_local_file(folder_path, file_name, content)
+                return success, content
+        return False, res.get("reason", "生成周报失败")
+    except Exception as e:
+        print(f"每周技术洞察执行失败: {e}")
+        return False, str(e)
+
 
 def list_archived_reports():
     """层级化扫描本地 storage/briefings 下所有保存的 Markdown 报告"""
