@@ -766,7 +766,7 @@ with tab_model_search:
                     
                     sel = st.checkbox(
                         f"**{p.get('title', '无标题')}**", 
-                        value=True, 
+                        value=not is_downloaded, 
                         key=f"model_search_sel_{idx}"
                     )
                     if sel:
