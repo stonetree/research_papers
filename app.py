@@ -747,12 +747,23 @@ with tab_model_search:
         st.markdown("---")
         res_col_left, res_col_right = st.columns([1.8, 1])
         
+        # 预先查询本地大仓中所有已下载的 paper_id
+        conn = get_db_connection()
+        db_paper_ids = {row['paper_id'] for row in conn.execute("SELECT paper_id FROM papers").fetchall()}
+        conn.close()
+        
         selected_indices = []
         with res_col_left:
             st.markdown(f"##### 📡 联网搜索结果 — `{st.session_state['model_search_query_used']}`")
             
+            import hashlib
             for idx, p in enumerate(st.session_state["model_search_results"]):
                 with st.container(border=True):
+                    # 计算当前检索论文的唯一 ID 以校验是否已下载
+                    title_str = p.get('title', '').strip()
+                    paper_id = hashlib.md5(title_str.encode('utf-8')).hexdigest()[:8]
+                    is_downloaded = paper_id in db_paper_ids
+                    
                     sel = st.checkbox(
                         f"**{p.get('title', '无标题')}**", 
                         value=True, 
@@ -760,7 +771,9 @@ with tab_model_search:
                     )
                     if sel:
                         selected_indices.append(idx)
-                    st.markdown(f"**👥 作者团队**: {p.get('authors', '未知')} &nbsp;|&nbsp; **📅 年份/会议**: {p.get('year_venue', '未知')}")
+                    
+                    status_desc = "🟢 已下载入库" if is_downloaded else "⏳ 未下载"
+                    st.markdown(f"**👥 作者团队**: {p.get('authors', '未知')} &nbsp;|&nbsp; **📅 年份/会议**: {p.get('year_venue', '未知')} &nbsp;|&nbsp; **📥 状态**: {status_desc}")
                     st.info(f"创新点简述: {p.get('summary', '无')}")
                     st.markdown(f"🔗 [可访问链接/PDF下载地址]({p.get('url', '#')})")
                     
