@@ -23,20 +23,20 @@ def translate_arxiv_url(url):
 def download_and_import_paper(paper_dict, model_id):
     """
     下载单篇论文，写入本地大仓并进行 AI 深度解构
-    返回 (success, message)
+    返回 (success, message, paper_id)
     """
     title = paper_dict.get("title", "").strip()
     url = paper_dict.get("url", "").strip()
     
     if not title:
-        return False, "论文标题为空，无法导入。"
+        return False, "论文标题为空，无法导入。", None
     if not url:
-        return False, f"《{title}》未提供可下载链接。"
+        return False, f"《{title}》未提供可下载链接。", None
         
     # 自动转换 arXiv URL
     pdf_url = translate_arxiv_url(url)
     
-    # 提取年份和会议/期刊
+    # 提取年份 and 会议/期刊
     year_venue = paper_dict.get("year_venue", "").strip()
     year = None
     venue = "联网检索"
@@ -67,11 +67,11 @@ def download_and_import_paper(paper_dict, model_id):
             # 已经存在，尝试对其运行 AI 解析
             res = analyze_and_store_paper(paper_id, pdf_path_rel, title, model_id=model_id)
             if res.startswith("❌"):
-                return False, f"论文已存在，但 AI 深度解构失败: {res}"
-            return True, f"《{title}》已存在于库中，已重新生成 AI 解构报告。"
+                return False, f"论文已存在，但 AI 深度解构失败: {res}", paper_id
+            return True, f"《{title}》已存在于库中，已重新生成 AI 解构报告。", paper_id
     finally:
         conn.close()
-
+ 
     # 开始下载物理 PDF
     print(f"📥 开始下载 PDF: {title} from {pdf_url}")
     try:
@@ -80,13 +80,13 @@ def download_and_import_paper(paper_dict, model_id):
         }
         res = requests.get(pdf_url, stream=True, timeout=45, headers=headers)
         if res.status_code != 200:
-            return False, f"下载 PDF 失败 (HTTP {res.status_code}): {pdf_url}"
+            return False, f"下载 PDF 失败 (HTTP {res.status_code}): {pdf_url}", None
             
         with open(local_pdf_path, 'wb') as f:
             for chunk in res.iter_content(chunk_size=8192):
                 f.write(chunk)
     except Exception as e:
-        return False, f"网络下载过程中出现异常: {e}"
+        return False, f"网络下载过程中出现异常: {e}", None
         
     # 写入 papers 数据库
     paper_data = {
@@ -104,13 +104,13 @@ def download_and_import_paper(paper_dict, model_id):
     try:
         insert_paper(paper_data)
     except Exception as e:
-        return False, f"数据库写入失败: {e}"
+        return False, f"数据库写入失败: {e}", None
         
     # 并发/串行触发 AI 首席科学家分析
     try:
         res = analyze_and_store_paper(paper_id, pdf_path_rel, title, model_id=model_id)
         if res.startswith("❌"):
-            return True, f"《{title}》已成功物理下载入库，但大模型分析遇到异常: {res}"
-        return True, f"《{title}》成功下载并完成 AI 首席科学家深度解构！"
+            return True, f"《{title}》已成功物理下载入库，但大模型分析遇到异常: {res}", paper_id
+        return True, f"《{title}》成功下载并完成 AI 首席科学家深度解构！", paper_id
     except Exception as e:
-        return True, f"《{title}》成功下载入库，但触发大模型解构时抛出异常: {e}"
+        return True, f"《{title}》成功下载入库，但触发大模型解构时抛出异常: {e}", paper_id

@@ -128,3 +128,15 @@ def delete_search_archive(archive_id):
         conn.commit()
     finally:
         conn.close()
+
+def delete_paper_metadata(paper_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Delete from dependencies first (ai_summaries has foreign key to papers)
+        cursor.execute('DELETE FROM ai_summaries WHERE paper_id = ?', (paper_id,))
+        # Then delete from papers table
+        cursor.execute('DELETE FROM papers WHERE paper_id = ?', (paper_id,))
+        conn.commit()
+    finally:
+        conn.close()

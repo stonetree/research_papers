@@ -25,7 +25,7 @@ builtins.print = timestamped_print
 import streamlit as st
 import os
 import threading
-from core.database import init_db, get_db_connection, resolve_pdf_path, insert_search_archive, get_search_archives, delete_search_archive
+from core.database import init_db, get_db_connection, resolve_pdf_path, insert_search_archive, get_search_archives, delete_search_archive, delete_paper_metadata
 from core.engine_semantic import execute_semantic_search
 from core.engine_arxiv import execute_arxiv_search
 from core.ai_analyst import analyze_and_store_paper, test_api_connection, model_web_search
@@ -37,10 +37,21 @@ from core.scheduler import start_scheduler, add_scheduler_task, delete_scheduler
 from core.funnel_search import execute_two_stage_funnel_search
 from config.research_topics import TOPIC_REGISTRY
 
-# 初始化本地数据库和 API 配置大仓，启动后台定时扫描服务
 init_db()
 api_models = load_api_config()
 start_scheduler()
+
+def format_utc_to_local(utc_str):
+    if not utc_str:
+        return "未知"
+    try:
+        from datetime import datetime, timezone
+        # Handle SQLite CURRENT_TIMESTAMP with or without millisecond parts
+        dt = datetime.strptime(utc_str.split(".")[0], "%Y-%m-%d %H:%M:%S")
+        dt = dt.replace(tzinfo=timezone.utc).astimezone(None)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return utc_str
 
 def extract_snippet_with_highlight(text, keyword, length=200):
     if not text or not keyword:
@@ -389,19 +400,28 @@ with tab_library:
     st.markdown("---")
 
     # 0. 全局数据装载与检索过滤 (位于最顶层以保持结构规整与数据一致)
-    search_keyword = st.text_input(
-        "🔍 全文搜索大模型分析报告", 
-        value=st.session_state.get("search_keyword", ""),
-        placeholder="输入关键词进行过滤，清空可浏览全部大仓...",
-        key="library_search_input"
-    )
-    st.session_state["search_keyword"] = search_keyword.strip()
+    col_filter1, col_filter2 = st.columns([2.5, 1])
+    with col_filter1:
+        search_keyword = st.text_input(
+            "🔍 全文搜索大模型分析报告", 
+            value=st.session_state.get("search_keyword", ""),
+            placeholder="输入关键词进行过滤，清空可浏览全部大仓...",
+            key="library_search_input"
+        )
+        st.session_state["search_keyword"] = search_keyword.strip()
+    with col_filter2:
+        analysis_filter = st.selectbox(
+            "🧠 AI 解析状态筛选",
+            options=["全部文献", "🟢 已完成 AI 解析", "⏳ 尚未完成 AI 解析"],
+            index=0,
+            key="library_analysis_filter"
+        )
     
     conn = get_db_connection()
     if st.session_state["search_keyword"]:
         # 全文搜索逻辑
         query = """
-            SELECT p.*, s.dialectical_analysis, s.model_name 
+            SELECT p.*, s.dialectical_analysis, s.model_name, s.updated_at 
             FROM papers p
             INNER JOIN ai_summaries s ON p.paper_id = s.paper_id
             WHERE s.dialectical_analysis IS NOT NULL AND s.dialectical_analysis != ''
@@ -427,13 +447,24 @@ with tab_library:
     else:
         # 默认无搜索词展示所有已入库的文献
         query = """
-            SELECT p.*, s.dialectical_analysis, s.model_name 
+            SELECT p.*, s.dialectical_analysis, s.model_name, s.updated_at 
             FROM papers p
             LEFT JOIN ai_summaries s ON p.paper_id = s.paper_id
             ORDER BY p.created_at DESC
         """
         papers_to_show = conn.execute(query).fetchall()
         conn.close()
+        
+    # 应用 AI 解析状态的二次过滤
+    filtered_papers = []
+    for p in papers_to_show:
+        is_analyzed = bool(p["dialectical_analysis"] and p["dialectical_analysis"].strip())
+        if analysis_filter == "🟢 已完成 AI 解析" and not is_analyzed:
+            continue
+        if analysis_filter == "⏳ 尚未完成 AI 解析" and is_analyzed:
+            continue
+        filtered_papers.append(p)
+    papers_to_show = filtered_papers
         
     paper_ids = [p["paper_id"] for p in papers_to_show]
     st.session_state["library_paper_ids"] = paper_ids
@@ -449,7 +480,7 @@ with tab_library:
     if active_paper_id:
         conn = get_db_connection()
         paper = conn.execute("""
-            SELECT p.*, s.dialectical_analysis, s.model_name 
+            SELECT p.*, s.dialectical_analysis, s.model_name, s.updated_at 
             FROM papers p
             LEFT JOIN ai_summaries s ON p.paper_id = s.paper_id
             WHERE p.paper_id = ?
@@ -458,13 +489,14 @@ with tab_library:
 
     # ---------------- 1. 第一区域：贯穿页面的窄区（工具按钮栏） ----------------
     if paper:
+        paper = dict(paper)
         try:
             curr_idx = paper_ids.index(active_paper_id)
         except ValueError:
             curr_idx = -1
             
         with st.container(border=True):
-            btn_col1, btn_col2, btn_col3, btn_col4 = st.columns([1, 1, 2, 2.5])
+            btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns([1, 1, 2.2, 2.2, 0.8])
             with btn_col1:
                 prev_disabled = (curr_idx <= 0)
                 if st.button("⏮️ 上一篇", key="prev_paper_btn", use_container_width=True, disabled=prev_disabled):
@@ -476,7 +508,7 @@ with tab_library:
                     st.session_state["active_view_paper_id"] = paper_ids[curr_idx + 1]
                     st.rerun()
             with btn_col3:
-                if paper['dialectical_analysis']:
+                if paper.get('dialectical_analysis'):
                     st.download_button(
                         label="📥 一键导出 Markdown 报告",
                         data=paper['dialectical_analysis'],
@@ -495,7 +527,17 @@ with tab_library:
                             else:
                                 st.rerun()
             with btn_col4:
-                st.markdown(f"<div style='padding-top: 6px; font-size: 0.95rem; color: #4B5563; font-weight: bold; text-align: right;'>📖 进度: {curr_idx + 1}/{len(paper_ids)} 篇 | 🧠 剖析大脑: {paper['model_name'] or '待激活'}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='padding-top: 6px; font-size: 0.9rem; color: #4B5563; font-weight: bold; text-align: right;'>📖 进度: {curr_idx + 1}/{len(paper_ids)} 篇 | 🧠 剖析: {paper.get('model_name') or '待激活'}</div>", unsafe_allow_html=True)
+            with btn_col5:
+                with st.popover("🗑️", help="删除文献元数据", use_container_width=True):
+                    st.markdown("**🗑️ 彻底删除文献元数据**")
+                    st.caption("系统将从本地数据库中永久删除该文献的登记元数据及生成的 AI 全景解构报告（不删除本地 PDF 物理文件）。此操作不可逆，请谨慎操作。")
+                    if st.button("🔥 确认删除", key=f"delete_paper_confirm_{paper['paper_id']}", use_container_width=True, type="primary"):
+                        delete_paper_metadata(paper['paper_id'])
+                        if "active_view_paper_id" in st.session_state:
+                            del st.session_state["active_view_paper_id"]
+                        st.toast("🗑️ 文献元数据与解析报告已成功删除！")
+                        st.rerun()
     else:
         st.info("💡 暂无正在阅读的文献数据。")
 
@@ -538,7 +580,9 @@ with tab_library:
                     ai_status = "🟢" if p["dialectical_analysis"] else "⏳"
                     
                     card_title = f"{card_emoji} {p['title']}"
-                    card_meta = f"{ai_status} [{p['venue'] or '顶会'}] {p['year']} | 📈 引用: {p['citations']}"
+                    add_time = format_utc_to_local(p['created_at'])
+                    parse_time = format_utc_to_local(p['updated_at']) if p['dialectical_analysis'] else "尚未解析"
+                    card_meta = f"{ai_status} [{p['venue'] or '顶会'}] {p['year']} | 📈 引用: {p['citations']} | 📅 添加时间: {add_time} | 🕒 解析时间: {parse_time}"
                     
                     # 渲染为小卡片样式
                     with st.container(border=True):
@@ -558,6 +602,7 @@ with tab_library:
     with col_right:
         st.markdown("##### 💡 首席科学家 AI 辩证剖析报告")
         if paper:
+            paper = dict(paper)
             # 独立滚动的右侧报告内容框 (高度设为 600px，与左侧框体完美绝对一致)
             with st.container(height=600):
                 st.markdown(f"### 📘 《{paper['title']}》")
@@ -566,6 +611,45 @@ with tab_library:
                 # 作者团队与物理文件信息
                 st.markdown(f"**👥 作者团队**: {paper['authors'] or '未知团队'}")
                 st.markdown(f"**📝 物理文件**: `{os.path.basename(paper['pdf_path']) if paper['pdf_path'] else '未关联'}`")
+                
+                # 格式化并渲染元数据信息 (来源、解析模型、添加时间、解析时间)
+                source_val = paper.get('source_engine', '')
+                if source_val == 'manual':
+                    source_desc = "✍️ 手动添加"
+                elif source_val == 'arxiv':
+                    source_desc = "🤖 自动从 arXiv 添加"
+                elif source_val == 'semantic_scholar':
+                    source_desc = "🤖 自动从 Semantic Scholar 添加"
+                elif source_val == 'model_web_search':
+                    source_desc = "🔍 从 AI 联网学术探测添加"
+                else:
+                    source_desc = f"📁 {source_val}" if source_val else "📁 其他来源"
+
+                model_desc = paper.get('model_name')
+                if not model_desc or not paper.get('dialectical_analysis'):
+                    model_desc = "⏳ 尚未进行 AI 解析"
+                    parse_time_desc = "⏳ 尚未进行 AI 解析"
+                else:
+                    model_desc = f"🧠 {model_desc}"
+                    parse_time_desc = format_utc_to_local(paper.get('updated_at'))
+
+                add_time_desc = format_utc_to_local(paper.get('created_at'))
+                
+                st.markdown(f"""
+                <div style="background-color: #f8f9fa; padding: 12px; border-radius: 6px; margin-bottom: 15px; border: 1px solid #e9ecef; font-size: 0.9rem; color: #374151;">
+                    <table style="width: 100%; border: none; border-collapse: collapse;">
+                        <tr style="border: none;">
+                            <td style="border: none; padding: 4px 0; width: 50%;"><b>📥 文档来源</b>: {source_desc}</td>
+                            <td style="border: none; padding: 4px 0; width: 50%;"><b>⚙️ 解析模型</b>: {model_desc}</td>
+                        </tr>
+                        <tr style="border: none;">
+                            <td style="border: none; padding: 4px 0; width: 50%;"><b>📅 添加时间</b>: {add_time_desc}</td>
+                            <td style="border: none; padding: 4px 0; width: 50%;"><b>🕒 解析时间</b>: {parse_time_desc}</td>
+                        </tr>
+                    </table>
+                </div>
+                """, unsafe_allow_html=True)
+                
                 st.markdown("**Abstract (摘要)**:")
                 st.info(paper['abstract'] or "暂无摘要描述。")
                 
@@ -652,6 +736,8 @@ with tab_model_search:
                     if success:
                         st.session_state["model_search_results"] = result
                         st.session_state["model_search_query_used"] = model_query.strip()
+                        if "last_imported_paper_ids" in st.session_state:
+                            del st.session_state["last_imported_paper_ids"]
                         st.toast("🟢 检索完成！")
                     else:
                         st.error(f"🔴 检索失败: {result}")
@@ -708,13 +794,16 @@ with tab_model_search:
                         status_text = st.empty()
                         
                         success_count = 0
+                        imported_ids = []
                         for i, idx in enumerate(selected_indices):
                             paper_info = st.session_state["model_search_results"][idx]
                             status_text.caption(f"正在处理 [{i+1}/{len(selected_indices)}]: {paper_info.get('title', '')[:20]}...")
                             
-                            success, msg = download_and_import_paper(paper_info, selected_brain_key)
+                            success, msg, paper_id = download_and_import_paper(paper_info, selected_brain_key)
                             if success:
                                 success_count += 1
+                                if paper_id:
+                                    imported_ids.append(paper_id)
                                 st.toast(f"✅ {paper_info.get('title')[:15]} 导入成功")
                             else:
                                 st.error(f"❌ 导入失败 《{paper_info.get('title')[:15]}》: {msg}")
@@ -723,11 +812,50 @@ with tab_model_search:
                             
                         status_text.empty()
                         if success_count > 0:
+                            st.session_state["last_imported_paper_ids"] = imported_ids
                             st.success(f"🎉 成功完成 {success_count} 篇黄金文献的下载、入库与大模型剖析！")
                             # 清除已有的未分析文献缓存
                             if "unanalyzed_papers" in st.session_state:
                                 del st.session_state["unanalyzed_papers"]
                             st.rerun()
+
+        # 显示最新生成的 AI 剖析报告入口 (直观查看解析结果)
+        if st.session_state.get("last_imported_paper_ids"):
+            st.markdown("---")
+            st.markdown("#### 📘 最新生成的 AI 剖析报告")
+            st.caption("以下为本次下载任务最新生成的 AI 全景解构报告。您可以直接展开查看，或将其设为当前阅读文献以在【📂 本地沉淀文献大仓】中进行对比。")
+            
+            conn = get_db_connection()
+            imported_papers = []
+            for pid in st.session_state["last_imported_paper_ids"]:
+                p = conn.execute("""
+                    SELECT p.*, s.dialectical_analysis, s.model_name, s.updated_at 
+                    FROM papers p
+                    LEFT JOIN ai_summaries s ON p.paper_id = s.paper_id
+                    WHERE p.paper_id = ?
+                """, (pid,)).fetchone()
+                if p:
+                    imported_papers.append(p)
+            conn.close()
+            
+            for ip in imported_papers:
+                with st.container(border=True):
+                    col_title, col_action = st.columns([2.5, 1.2])
+                    with col_title:
+                        st.markdown(f"**📖 《{ip['title']}》**")
+                        st.caption(f"📅 年份: `{ip['year'] or '未知'}` | 🏷️ 顶会/期刊: `{ip['venue'] or '未知'}` | 🧠 剖析大脑: `{ip['model_name'] or '未知'}`")
+                    with col_action:
+                        if st.button("📂 设为当前阅读文献", key=f"set_active_imported_{ip['paper_id']}", use_container_width=True):
+                            st.session_state["active_view_paper_id"] = ip["paper_id"]
+                            if "search_keyword" in st.session_state:
+                                st.session_state["search_keyword"] = ""
+                            st.toast(f"👉 已成功将 《{ip['title'][:15]}...》 设为当前阅读文献！请切换到上方【📂 本地沉淀文献大仓】选项卡阅读。")
+                            
+                    with st.expander("👁️ 直接在此查看 AI 全景剖析报告正文"):
+                        if ip["dialectical_analysis"]:
+                            st.markdown(ip["dialectical_analysis"])
+                        else:
+                            st.warning("⏳ 报告正文正在生成或写入中，请稍后刷新。")
 
     # 历史归档列表
     st.markdown("---")
@@ -748,6 +876,8 @@ with tab_model_search:
                         import json
                         st.session_state["model_search_results"] = json.loads(arc["results_json"])
                         st.session_state["model_search_query_used"] = arc["query"]
+                        if "last_imported_paper_ids" in st.session_state:
+                            del st.session_state["last_imported_paper_ids"]
                         st.rerun()
                 with col_arc_btn2:
                     if st.button("🗑️ 移除归档", key=f"del_arc_{arc['archive_id']}", use_container_width=True):
