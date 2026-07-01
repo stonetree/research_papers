@@ -65,7 +65,10 @@ def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
         
     model_name = config.get("model_name", "gemini-2.5-flash")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     
     # 代理支持
     proxies = None
@@ -171,10 +174,41 @@ def save_to_local_file(folder_path, title, text):
         print(f"[{datetime.datetime.now()}] 保存文件失败: {e}")
         return False, str(e)
 
+def wait_for_network_connectivity(timeout_seconds=90, check_interval=5):
+    """等待网络连接就绪（通过测试连接公共服务如 baidu.com 或 google.com）"""
+    import urllib.request
+    print(f"🌐 [网络就绪检测] 开始检测网络连接，超时限制: {timeout_seconds}秒...")
+    start_time = datetime.datetime.now()
+    while (datetime.datetime.now() - start_time).total_seconds() < timeout_seconds:
+        try:
+            # 尝试连接百度
+            urllib.request.urlopen("https://www.baidu.com", timeout=3)
+            print("🟢 [网络就绪检测] 检测到网络连接已畅通！")
+            return True
+        except Exception:
+            try:
+                # 尝试连接 Google (如果代理已经就位)
+                urllib.request.urlopen("https://www.google.com", timeout=3)
+                print("🟢 [网络就绪检测] 检测到网络/代理连接已畅通！")
+                return True
+            except Exception:
+                pass
+        print(f"⏳ [网络就绪检测] 网络尚未就绪，等待 {check_interval} 秒后重试...")
+        import time
+        time.sleep(check_interval)
+    print("🔴 [网络就绪检测] 达到超时时间，未检测到可用网络连接。")
+    return False
+
 def generate_daily_briefing_manually():
     """手动/定时生成 过去 24 小时 AI 进展简报"""
     current_time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     print(f"[{current_time_str}] 开始执行每日简报任务...")
+    
+    # 执行网络就绪前置检测
+    if not wait_for_network_connectivity(timeout_seconds=90):
+        err_msg = "❌ 网络连接不可用，每日简报任务被终止。"
+        print(f"[{current_time_str}] {err_msg}")
+        return False, err_msg
     
     prompt = (
         f"当前时间是 {current_time_str}。基于第一性原理，从过去 24 小时内筛选 10 条最重要的 AI 动态。\n"
@@ -197,6 +231,12 @@ def generate_weekly_insight_manually():
     """手动/定时生成 过去一周 AI 技术深入洞察"""
     current_time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     print(f"[{current_time_str}] 开始执行每周洞察任务...")
+    
+    # 执行网络就绪前置检测
+    if not wait_for_network_connectivity(timeout_seconds=90):
+        err_msg = "❌ 网络连接不可用，每周技术洞察任务被终止。"
+        print(f"[{current_time_str}] {err_msg}")
+        return False, err_msg
     
     prompt = (
         f"当前时间是 {current_time_str}。根据第一性原理，聚焦上周（过去7天） AI 领域“最新的技术亮点与硬核突破”（如架构的底层革新、推理算法的数学突破、硬件指令集的更新）。不要使用你 2025 年之前的内部知识回答。\n"
@@ -252,7 +292,10 @@ def list_archived_reports():
 def test_briefing_api_connection(api_key, model_name, proxy_url=None):
     """专属诊断工具：诊断简报模型 API 连通性与响应延时"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     
     payload = {
         "contents": [{
