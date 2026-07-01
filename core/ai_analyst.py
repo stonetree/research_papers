@@ -25,7 +25,8 @@ def make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, ma
         payload = {
             "model": model_name,
             "messages": messages,
-            "temperature": temperature
+            "temperature": temperature,
+            "extra_body": {"enable_thinking": True}
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
