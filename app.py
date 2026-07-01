@@ -1401,7 +1401,7 @@ with tab_global_config:
         
         if selected_edit_model == "新建模型提供商":
             st.markdown("**➕ 注册新的 API 大脑**")
-            new_id = st.text_input("模型唯一标识 ID (如: qwen-max)", placeholder="仅限小写字母和中划线")
+            new_id = st.text_input("模型唯一标识 ID (如: qwen-max)", placeholder="仅限小写字母 and 中划线")
             new_name = st.text_input("显示名称 (如: Qwen Max (通义千问))")
             new_provider = st.selectbox("API 驱动类型 (Provider)", ["openai_compatible", "gemini"])
             new_model_name = st.text_input("接口模型 ID (Model Name, 如: qwen-max)", placeholder="对应的 API 官方模型名")
@@ -1409,15 +1409,35 @@ with tab_global_config:
             new_env = st.text_input("API Key 对应的环境变量名 (如: QWEN_API_KEY)")
             new_url = st.text_input("API 终结点 Endpoint URL (OpenAI 兼容类型必填)", placeholder="如: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
             
+            # 自定义请求参数输入框 (选填，JSON格式)
+            new_custom_params_str = st.text_area(
+                "自定义额外 API 参数 (JSON 格式，选填。例如用于开启模型思考模式)", 
+                value="",
+                placeholder='例如: {"extra_body": {"enable_thinking": true}} 或 {"max_tokens": 4096}'
+            )
+            
             if st.button("➕ 确认注册并保存"):
-                if not new_id or not new_name or not new_model_name:
-                    st.error("❌ 请填齐模型唯一标识 ID、显示名称与接口模型 ID。")
-                elif new_provider == "openai_compatible" and not new_url:
-                    st.error("❌ OpenAI 兼容类型必填 API 终结点 Endpoint URL。")
-                else:
-                    if update_model_config(new_id.strip(), new_name.strip(), new_provider, new_model_name.strip(), new_api_key.strip(), new_url.strip(), new_env.strip()):
-                        st.success(f"🎉 成功注册大模型提供商: `{new_name}`！")
-                        st.rerun()
+                custom_params = {}
+                is_json_valid = True
+                if new_custom_params_str.strip():
+                    try:
+                        custom_params = json.loads(new_custom_params_str.strip())
+                        if not isinstance(custom_params, dict):
+                            st.error("❌ 自定义额外 API 参数必须是一个 JSON 对象 (即以 {} 包围的键值对)。")
+                            is_json_valid = False
+                    except Exception as je:
+                        st.error(f"❌ 自定义额外 API 参数 JSON 解析失败: {je}")
+                        is_json_valid = False
+                
+                if is_json_valid:
+                    if not new_id or not new_name or not new_model_name:
+                        st.error("❌ 请填齐模型唯一标识 ID、显示名称与接口模型 ID。")
+                    elif new_provider == "openai_compatible" and not new_url:
+                        st.error("❌ OpenAI 兼容类型必填 API 终结点 Endpoint URL。")
+                    else:
+                        if update_model_config(new_id.strip(), new_name.strip(), new_provider, new_model_name.strip(), new_api_key.strip(), new_url.strip(), new_env.strip(), custom_params=custom_params):
+                            st.success(f"🎉 成功注册大模型提供商: `{new_name}`！")
+                            st.rerun()
         else:
             # 编辑已有模型配置
             cfg = api_models[selected_edit_model]
@@ -1436,14 +1456,38 @@ with tab_global_config:
             edit_env = st.text_input("API Key 对应的环境变量名", value=cfg.get("api_key_env", ""))
             edit_url = st.text_input("API 终结点 Endpoint URL", value=cfg.get("url", ""))
             
+            # 获取已保存的 custom_params
+            saved_custom_params = cfg.get("custom_params", {})
+            saved_custom_params_str = json.dumps(saved_custom_params, ensure_ascii=False, indent=4) if saved_custom_params else ""
+            
+            # 自定义请求参数输入框 (选填，JSON格式)
+            edit_custom_params_str = st.text_area(
+                "自定义额外 API 参数 (JSON 格式，选填。例如用于开启模型思考模式)", 
+                value=saved_custom_params_str,
+                placeholder='例如: {"extra_body": {"enable_thinking": true}} 或 {"max_tokens": 4096}'
+            )
+            
             col_btn1, col_btn2 = st.columns([1, 1])
             with col_btn1:
                 if st.button("💾 保存模型修改"):
                     # 如果密文框为空，使用原始已保存的 Key
                     final_key = edit_api_key.strip() if edit_api_key.strip() else original_api_key
-                    if update_model_config(selected_edit_model, edit_name.strip(), edit_provider, edit_model_name.strip(), final_key, edit_url.strip(), edit_env.strip()):
-                        st.success("🎉 模型配置修改已成功保存！")
-                        st.rerun()
+                    custom_params = {}
+                    is_json_valid = True
+                    if edit_custom_params_str.strip():
+                        try:
+                            custom_params = json.loads(edit_custom_params_str.strip())
+                            if not isinstance(custom_params, dict):
+                                st.error("❌ 自定义额外 API 参数必须是一个 JSON 对象 (即以 {} 包围的键值对)。")
+                                is_json_valid = False
+                        except Exception as je:
+                            st.error(f"❌ 自定义额外 API 参数 JSON 解析失败: {je}")
+                            is_json_valid = False
+                    
+                    if is_json_valid:
+                        if update_model_config(selected_edit_model, edit_name.strip(), edit_provider, edit_model_name.strip(), final_key, edit_url.strip(), edit_env.strip(), custom_params=custom_params):
+                            st.success("🎉 模型配置修改已成功保存！")
+                            st.rerun()
             with col_btn2:
                 if st.button("🗑️ 彻底删除该模型配置"):
                     if delete_model_config(selected_edit_model):

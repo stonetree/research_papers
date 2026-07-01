@@ -6,7 +6,7 @@ import requests
 from .database import save_ai_summary
 from .config_loader import get_model_config, get_global_settings
 
-def make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, max_tokens=None, timeout=3600):
+def make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, max_tokens=None, timeout=3600, custom_params=None):
     is_responses_api = "/responses" in api_url
     
     headers = {
@@ -25,11 +25,20 @@ def make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, ma
         payload = {
             "model": model_name,
             "messages": messages,
-            "temperature": temperature,
-            "extra_body": {"enable_thinking": True}
+            "temperature": temperature
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+            
+    # 动态融合用户指定的自定义额外参数
+    if custom_params and isinstance(custom_params, dict):
+        for k, v in custom_params.items():
+            if k in payload and isinstance(payload[k], dict) and isinstance(v, dict):
+                # 递归融合子字典 (例如：融合 extra_body)
+                payload[k] = payload[k].copy()
+                payload[k].update(v)
+            else:
+                payload[k] = v
             
     response = requests.post(api_url, headers=headers, json=payload, timeout=timeout)
     return response
@@ -292,7 +301,7 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                         {"role": "user", "content": f"提取以下论文开头的标题：\n\n{paper_text[:3000]}"}
                     ]
                     print(f"🔍 [{display_name} 标题提取] 手动导入的文献，正在请求提取真实官方标题...")
-                    t_response = make_llm_request(api_url, api_key, model_name, title_messages, temperature=0.0, timeout=3600)
+                    t_response = make_llm_request(api_url, api_key, model_name, title_messages, temperature=0.0, timeout=3600, custom_params=cfg.get("custom_params"))
                     content, err = parse_llm_response(t_response, "/responses" in api_url)
                     if not err and content:
                         extracted_title = content.strip().replace('"', '').replace("'", "").replace("`", "")
@@ -321,7 +330,7 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
             for attempt in range(max_retries):
                 try:
                     print(f"⏳ [LLM 请求尝试 {attempt+1}/{max_retries}] 正在向 API 发送学术分析请求，等待大模型响应 (通常需要 20-60 秒，请耐心等待)...")
-                    response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600)
+                    response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600, custom_params=cfg.get("custom_params"))
                     if response.status_code == 200:
                         print(f"📥 [LLM 响应接收] 成功收到大模型 HTTP 200 响应。")
                         break
@@ -409,7 +418,7 @@ def test_api_connection(model_id):
                 {"role": "user", "content": "Hello, connection check! Please reply exactly with 'OK' in 1 word."}
             ]
             is_responses_api = "/responses" in api_url
-            response = make_llm_request(api_url, api_key, model_name, messages, max_tokens=2048, timeout=15)
+            response = make_llm_request(api_url, api_key, model_name, messages, max_tokens=2048, timeout=15, custom_params=cfg.get("custom_params"))
             latency = time.time() - start_time
             if response.status_code == 200:
                 content, err = parse_llm_response(response, is_responses_api)
@@ -491,7 +500,7 @@ def arbitrate_papers(candidates, topic_name, model_id):
                 {"role": "user", "content": user_prompt}
             ]
             is_responses_api = "/responses" in api_url
-            response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600)
+            response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600, custom_params=cfg.get("custom_params"))
             if response.status_code == 200:
                 content, err = parse_llm_response(response, is_responses_api)
                 if not err and content:
@@ -545,7 +554,7 @@ def model_web_search(query_string, model_id):
     ]
     
     try:
-        response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600)
+        response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600, custom_params=cfg.get("custom_params"))
         if response.status_code == 200:
             content, err = parse_llm_response(response, "/responses" in api_url)
             if not err and content:

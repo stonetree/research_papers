@@ -95,7 +95,7 @@ def update_global_settings(settings):
     raw["_global_settings"] = settings
     return save_raw_config(raw)
 
-def update_model_config(model_id, name, provider, model_name, api_key, url, api_key_env=""):
+def update_model_config(model_id, name, provider, model_name, api_key, url, api_key_env="", custom_params=None):
     """更新或添加特定模型的配置"""
     raw = load_raw_config()
     raw[model_id] = {
@@ -104,7 +104,8 @@ def update_model_config(model_id, name, provider, model_name, api_key, url, api_
         "model": model_name,
         "api_key": api_key,
         "api_key_env": api_key_env or f"{model_id.replace('-', '_').upper()}_API_KEY",
-        "url": url
+        "url": url,
+        "custom_params": custom_params or {}
     }
     return save_raw_config(raw)
 
