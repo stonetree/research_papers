@@ -24,6 +24,7 @@ builtins.print = timestamped_print
 
 import streamlit as st
 import os
+import json
 import threading
 from core.database import init_db, get_db_connection, resolve_pdf_path, insert_search_archive, get_search_archives, delete_search_archive, delete_paper_metadata
 from core.engine_semantic import execute_semantic_search
