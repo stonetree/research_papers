@@ -338,6 +338,7 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
         print(f"🤖 深度模型激活 [{display_name}]：正在提取并剖析 《{title}》...")
         try:
             paper_text = extract_text_from_pdf(pdf_path)
+            if not paper_text:
                 err_msg = "❌ [PDF 文本提取失败] 提取文本为空，无法进行 non-multimodal 分析。"
                 print(err_msg)
                 save_ai_summary(paper_id, f"{display_name} ({model_name})", err_msg)
