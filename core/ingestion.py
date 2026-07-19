@@ -645,7 +645,10 @@ async def ingest_markdown_text_to_v2(
         "scored_by_model": "system",
         "published_at": datetime.now().isoformat(),
         "license_hint": "open_access",
-        "ai_summary": full_text_markdown[:400]
+        "full_text_markdown": full_text_markdown,
+        "ai_summary": full_text_markdown[:400],
+        "structured_takeaways_json": "[]",
+        "evidence_json": "[]"
     }
 
     coordinator = IngestionCoordinator(db_path)
