@@ -102,6 +102,7 @@ def execute_scan_and_analysis(model_id):
         settings = get_global_settings()
         max_workers = settings.get("max_concurrent_analysis", 2)
         max_batch = settings.get("max_papers_per_batch", 3)
+        detailed_model_id = settings.get("detailed_analysis_model_id", model_id) or model_id
         
         # Enforce batch limit
         papers_to_process = unanalyzed[:max_batch]
@@ -112,7 +113,7 @@ def execute_scan_and_analysis(model_id):
         def run_single_analysis(paper):
             print(f"⏰ [定时器并发任务开始] 正在解析: {paper['title']}")
             resolved_pdf = resolve_pdf_path(paper["pdf_path"])
-            res = analyze_and_store_paper(paper["paper_id"], resolved_pdf, paper["title"], model_id=model_id)
+            res = analyze_and_store_paper(paper["paper_id"], resolved_pdf, paper["title"], model_id=detailed_model_id)
             if res.startswith("❌"):
                 print(f"⏰ [定时器并发任务报错] 《{paper['title']}》解构失败: {res}")
             else:
@@ -139,6 +140,9 @@ def execute_online_search_and_analysis(topic_key, search_limit, model_id):
             return
             
         topic = TOPIC_REGISTRY[topic_key]
+        settings = get_global_settings()
+        relevance_model_id = settings.get("abstract_relevance_model_id", model_id) or model_id
+        detailed_model_id = settings.get("detailed_analysis_model_id", model_id) or model_id
         
         # 1. 启动双阶段漏斗检索
         print("⏰ [定时器漏斗] 启动双阶段漏斗线上拉取检索...")
@@ -146,20 +150,19 @@ def execute_online_search_and_analysis(topic_key, search_limit, model_id):
             topic_name=topic["name"],
             query_string=topic["mapping_query"],
             target_limit=search_limit,
-            model_id=model_id
+            model_id=relevance_model_id
         )
         
         if new_items:
             print(f"⏰ [定时器漏斗] 成功探测抓取并初审沉淀 {len(new_items)} 篇黄金文献。开始并发生成剖析报告...")
             # 2. 补全 AI 解析
             from concurrent.futures import ThreadPoolExecutor
-            settings = get_global_settings()
             max_workers = settings.get("max_concurrent_analysis", 2)
             
             def run_single_analysis(item):
                 print(f"⏰ [定时器并发任务开始] 正在剖析线上新文献: {item['title']}")
                 resolved_pdf = resolve_pdf_path(item["pdf_path"])
-                res = analyze_and_store_paper(item["paper_id"], resolved_pdf, item["title"], model_id=model_id)
+                res = analyze_and_store_paper(item["paper_id"], resolved_pdf, item["title"], model_id=detailed_model_id)
                 if res.startswith("❌"):
                     print(f"⏰ [定时器并发任务报错] 《{item['title']}》解构失败: {res}")
                 else:
