@@ -212,12 +212,12 @@ def generate_daily_briefing_manually():
         return False, err_msg
     
     prompt = (
-        f"当前时间是 {current_time_str}。基于第一性原理，从过去 24 小时内筛选 10 条最重要的 AI 动态。\n"
+        f"【强制联网指令】：请你务必且必须首先使用内置的 google_search 检索工具，搜索并获取截至目前（{current_time_str}）过去 24 小时内全网 AI 领域的 10 条核心技术动态与突破。\n"
         "必须严格聚焦于“工业界与学术界的最新实质性动态”，例如厂商推出了具体的新模型，或学术界发表了解决突出问题的具体新算法。拒绝宽泛的行业新闻。不要使用你 2025 年之前的内部知识回答。\n"
         "要求：详尽分析，从第一性原理出发，辩证分析问题的正确性、完整性、和必要性，给出遵从科学与事实的结论，生成的报告需具有良好的可读性，突出重点。"
     )
     
-    system_instruction = "你是一个顶级的 AI 系统架构师。你必须首先使用 Google Search 搜索过去 24 小时内真实的工业界动态和学术论文。基于搜索到的事实，运用第一性原理进行辩证分析。必须确保输出的是最新信息，严禁胡编乱造。"
+    system_instruction = "你是一个顶级的 AI 系统架构师。你在生成报告前必须首先调用 Google Search 工具在全网检索过去 24 小时内最新的技术新闻与论文。基于实际检索到的事实，运用第一性原理进行辩证分析。必须确保输出的是最新信息，严禁胡编乱造。"
     
     content = call_gemini_api_with_search(prompt, system_instruction=system_instruction)
     if content and not content.startswith("❌"):
@@ -226,24 +226,33 @@ def generate_daily_briefing_manually():
         folder_path = get_briefing_local_path("每日简报")
         success, path = save_to_local_file(folder_path, file_name, content)
         
-        # 将产生的原汁原味高端 Markdown 沉淀至系统 SQLite 数据表
+        # 将产生的原汁原味高端 Markdown 沉淀至系统 SQLite 数据表（完全对齐 documents 表 Schema）
         try:
+            import hashlib
             from core.database import get_db_connection
             conn = get_db_connection()
             doc_id = f"daily_brief_{date_str}"
             now_iso = datetime.datetime.now().isoformat()
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            canonical_url = f"file://storage/briefings/daily_brief_{date_str}.md"
+            
             conn.execute("""
-                INSERT OR REPLACE INTO documents (doc_id, title, source_type, status, ingested_at)
-                VALUES (?, ?, 'daily_brief', 'completed', ?)
-            """, (doc_id, f"每日 AI 进展简报 ({date_str})", now_iso))
+                INSERT OR REPLACE INTO documents (
+                    doc_id, source_type, title, canonical_url, local_path, 
+                    content_hash, origin_provider, discovery_provider, crawl_provider, 
+                    analysis_model, status, published_at, ingested_at
+                ) VALUES (?, 'daily_brief', ?, ?, ?, ?, 'local_fs', 'gemini_grounding', 'native', 'gemini-2.5-flash', 'ingested', ?, ?)
+            """, (doc_id, f"每日 AI 进展简报 ({date_str})", canonical_url, path, content_hash, now_iso, now_iso))
+            
             conn.execute("""
                 INSERT OR REPLACE INTO document_contents (doc_id, full_text_markdown, updated_at)
                 VALUES (?, ?, ?)
             """, (doc_id, content, now_iso))
             conn.commit()
             conn.close()
+            print(f"[{datetime.datetime.now()}] 成功将每日简报同步沉淀至 SQLite 数据库 documents 表。")
         except Exception as sync_ex:
-            print(f"同步报告至 SQLite 数据表发生非阻塞异常: {sync_ex}")
+            print(f"同步简报至 SQLite 数据表发生异常: {sync_ex}")
             
         return success, content
     return False, content
@@ -260,12 +269,12 @@ def generate_weekly_insight_manually():
         return False, err_msg
     
     prompt = (
-        f"当前时间是 {current_time_str}。根据第一性原理，聚焦上周（过去7天） AI 领域“最新的技术亮点与硬核突破”（如架构的底层革新、推理算法的数学突破、硬件指令集的更新）。不要使用你 2025 年之前的内部知识回答。\n"
+        f"【强制联网指令】：根据第一性原理，请你务必首先调用内置的 google_search 检索工具，搜索并获取截至目前（{current_time_str}）过去 7 天内全网 AI 领域“最新的技术亮点与硬核突破”（如架构的底层革新、推理算法的数学突破、硬件指令集的更新）。不要使用你 2025 年之前的内部知识回答。\n"
         "严禁对一般技术进行泛泛而谈，必须进行深度辩证分析。\n"
         "要求：详尽分析，从第一性原理出发，辩证分析问题的正确性、完整性、和必要性，给出遵从科学与事实的结论，生成的报告需具有良好的可读性，结构清晰，重点突出。"
     )
     
-    system_instruction = "你是一个顶级的 AI 系统架构师。你必须首先使用 Google Search 搜索过去一周（7天）内真实的工业界动态和学术论文。基于搜索到的事实，运用第一性原理进行辩证分析。必须确保输出的是最新信息，严禁胡编乱造。"
+    system_instruction = "你是一个顶级的 AI 系统架构师。你在生成洞察前必须首先调用 Google Search 工具在全网检索上周（7天）最新的极客技术新闻与顶级论文。基于检索到的事实，运用第一性原理进行辩证分析。必须确保输出的是最新信息，严禁胡编乱造。"
     
     content = call_gemini_api_with_search(prompt, system_instruction=system_instruction)
     if content and not content.startswith("❌"):
@@ -274,24 +283,33 @@ def generate_weekly_insight_manually():
         folder_path = get_briefing_local_path("每周洞察报告")
         success, path = save_to_local_file(folder_path, file_name, content)
         
-        # 将产生的原汁原味高端 Markdown 周报沉淀至系统 SQLite 数据表
+        # 将产生的原汁原味高端 Markdown 周报沉淀至系统 SQLite 数据表（完全对齐 documents 表 Schema）
         try:
+            import hashlib
             from core.database import get_db_connection
             conn = get_db_connection()
             doc_id = f"weekly_insight_{date_str}"
             now_iso = datetime.datetime.now().isoformat()
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            canonical_url = f"file://storage/briefings/weekly_insight_{date_str}.md"
+            
             conn.execute("""
-                INSERT OR REPLACE INTO documents (doc_id, title, source_type, status, ingested_at)
-                VALUES (?, ?, 'weekly_insight', 'completed', ?)
-            """, (doc_id, f"每周 AI 技术深入洞察 ({date_str})", now_iso))
+                INSERT OR REPLACE INTO documents (
+                    doc_id, source_type, title, canonical_url, local_path, 
+                    content_hash, origin_provider, discovery_provider, crawl_provider, 
+                    analysis_model, status, published_at, ingested_at
+                ) VALUES (?, 'weekly_insight', ?, ?, ?, ?, 'local_fs', 'gemini_grounding', 'native', 'gemini-2.5-flash', 'ingested', ?, ?)
+            """, (doc_id, f"每周 AI 技术深入洞察 ({date_str})", canonical_url, path, content_hash, now_iso, now_iso))
+            
             conn.execute("""
                 INSERT OR REPLACE INTO document_contents (doc_id, full_text_markdown, updated_at)
                 VALUES (?, ?, ?)
             """, (doc_id, content, now_iso))
             conn.commit()
             conn.close()
+            print(f"[{datetime.datetime.now()}] 成功将每周洞察同步沉淀至 SQLite 数据库 documents 表。")
         except Exception as sync_ex:
-            print(f"同步周报至 SQLite 数据表发生非阻塞异常: {sync_ex}")
+            print(f"同步周报至 SQLite 数据表发生异常: {sync_ex}")
             
         return success, content
     return False, content
