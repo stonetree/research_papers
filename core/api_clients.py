@@ -24,6 +24,18 @@ class LocalComputeKernelClient:
         self.embedding_sem = asyncio.Semaphore(8)
         self.rerank_sem = asyncio.Semaphore(8)
 
+    async def check_embedding_service_health(self) -> bool:
+        """
+        心跳检测：检查本地 8081 端口 Embedding 服务是否处于 Ready 就绪状态
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {"input": "healthcheck", "model": "qwen3-embedding"}
+                async with session.post(self.embedding_url, json=payload, timeout=2) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
+
     async def get_embedding(self, text: str) -> Optional[List[float]]:
         """
         向本地 8081 端口获取高维稠密特征向量
@@ -195,13 +207,33 @@ class FirecrawlApiClient:
                 if not raw_data.get("success"):
                     raise RuntimeError(f"Firecrawl scrape failed: {raw_data.get('error')}")
                 
-                data_section = raw_data.get("data", {})
-                metadata = data_section.get("metadata", {})
-                credits_spent = raw_data.get("metadata", {}).get("credits_spent", 1)
-                
+                # 返回核心解析数据与统一 1 Credit 开销标记
+                data = raw_data.get("data", {})
                 return {
-                    "success_url": target_url,
-                    "credits_spent": credits_spent,
-                    "markdown": data_section.get("markdown", ""),
-                    "title": metadata.get("title", "Unknown Web Title")
+                    "markdown": data.get("markdown", ""),
+                    "title": data.get("metadata", {}).get("title", target_url),
+                    "credit_cost": 1.0
                 }
+
+
+def check_embedding_service_health_sync() -> bool:
+    """同步版本的 8081 Embedding 服务心跳健康探测"""
+    import asyncio
+    import concurrent.futures
+
+    client = LocalComputeKernelClient()
+
+    async def _run():
+        return await client.check_embedding_service_health()
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, _run())
+            return future.result()
+    else:
+        return asyncio.run(_run())

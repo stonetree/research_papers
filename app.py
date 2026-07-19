@@ -253,6 +253,28 @@ st.sidebar.markdown("---")
 # 🔌 系统诊断与状态
 st.sidebar.subheader("🔌 系统诊断与状态")
 
+from core.api_clients import check_embedding_service_health_sync
+from core.ingestion import get_pending_vectorization_documents, batch_process_pending_vectorization_sync
+
+is_embed_ready = check_embedding_service_health_sync()
+pending_vec_docs = get_pending_vectorization_documents()
+pending_vec_count = len(pending_vec_docs)
+
+if is_embed_ready:
+    st.sidebar.caption("🧬 Embedding 引擎 (8081): 🟢 就绪 (Ready)")
+    if pending_vec_count > 0:
+        st.sidebar.warning(f"🟢 **Embedding 服务已就绪！** 检测到 `{pending_vec_count}` 篇待向量化积压文档。")
+        if st.sidebar.button("⚡ 启动待入库队列处理", type="primary", key="side_run_pending_sync", width="stretch"):
+            with st.spinner("正在为待处理队列补全切片与向量特征..."):
+                res_sync = batch_process_pending_vectorization_sync()
+                st.sidebar.success(f"🎉 补偿处理成功！完成 {res_sync.get('processed_count', 0)} 篇。")
+                st.toast("🟢 待向量化队列自愈完成！")
+                st.rerun()
+else:
+    st.sidebar.caption("🧬 Embedding 引擎 (8081): 🟡 离线/未启动")
+    if pending_vec_count > 0:
+        st.sidebar.warning(f"⚠️ **Embedding 未就绪** | 待处理积压: `{pending_vec_count}` 篇 (已被安全挂起存储)")
+
 # 读取开机默认大脑设置并匹配选项索引
 default_model_id = get_default_model()
 model_keys = list(api_models.keys())

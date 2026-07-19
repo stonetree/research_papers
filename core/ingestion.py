@@ -590,9 +590,37 @@ async def ingest_markdown_text_to_v2(
         logger.warning(f"V2 文本内容为空，取消摄取: doc_id={doc_id}")
         return False
 
+    # 检查 Embedding 是否处于 Ready 就绪状态
+    is_embedding_ready = await compute_client.check_embedding_service_health()
+    if not is_embedding_ready:
+        logger.warning(f"⚠️ [Embedding 127.0.0.1:8081 离线] doc_id={doc_id} 的全文本已写入 SQLite (status='pending')，安全挂起等待就绪。")
+        writer = WriteWorker(db_path)
+        content_hash = hashlib.sha256(full_text_markdown.encode("utf-8")).hexdigest()
+        if not canonical_url:
+            canonical_url = f"file://storage/briefings/{doc_id}.md"
+        now_iso = datetime.now().isoformat()
+        
+        sql_pipeline = [
+            (
+                """INSERT OR REPLACE INTO documents (
+                    doc_id, source_type, title, authors, canonical_url, local_path, 
+                    content_hash, origin_provider, discovery_provider, crawl_provider, 
+                    analysis_model, status, published_at, ingested_at
+                ) VALUES (?, ?, ?, ?, ?, '', ?, 'local_fs', 'gemini_grounding', 'native', 'gemini-2.5-flash', 'pending', ?, ?)""",
+                (doc_id, source_type, title, authors, canonical_url, content_hash, now_iso, now_iso)
+            ),
+            (
+                """INSERT OR REPLACE INTO document_contents (
+                    doc_id, full_text_markdown, ai_summary, structured_takeaways_json, evidence_json
+                ) VALUES (?, ?, ?, '[]', '[]')""",
+                (doc_id, full_text_markdown, full_text_markdown[:400])
+            )
+        ]
+        await writer.execute_write(sql_pipeline)
+        return True
+
     # 1. 文本级拆分分块
     raw_chunks = split_text_into_chunks(full_text_markdown, chunk_size=800, overlap=100)
-    compute_client = LocalComputeKernelClient()
     chunks_payload: List[Dict[str, Any]] = []
     vectors_list: List[List[float]] = []
 
@@ -606,8 +634,8 @@ async def ingest_markdown_text_to_v2(
             vec = None
             
         if not vec:
-            vec = list(np.zeros(VECTOR_DIM).astype(float))
-            logger.info(f"💡 [Embedding 离线降级] 自动填入全零向量并正常沉淀 FTS5 全文切片 (doc_id={doc_id})")
+            logger.warning(f"⚠️ 局部切片特征提取失败，文档重置为 pending 等待重试: doc_id={doc_id}")
+            return False
 
         chunks_payload.append({
             "text": text_block,
@@ -688,6 +716,109 @@ def ingest_markdown_text_to_v2_sync(
             canonical_url=canonical_url,
             db_path=db_path
         )
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, _run())
+            return future.result()
+    else:
+        return asyncio.run(_run())
+
+
+def get_pending_vectorization_documents(db_path: str = DB_PATH) -> List[Dict[str, Any]]:
+    """查询 SQLite 中所有等待补全特征向量与切片的待处理文档 (status = 'pending')"""
+    import sqlite3
+    if not os.path.exists(db_path):
+        return []
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT d.doc_id, d.title, d.source_type, d.canonical_url, d.local_path, d.authors, c.full_text_markdown, c.ai_summary
+            FROM documents d
+            LEFT JOIN document_contents c ON d.doc_id = c.doc_id
+            WHERE d.status = 'pending'
+            ORDER BY d.ingested_at DESC
+        """)
+        rows = cursor.fetchall()
+        results = [dict(r) for r in rows]
+        conn.close()
+        return results
+    except Exception as e:
+        logger.error(f"查询 pending 文档队列失败: {e}")
+        return []
+
+
+async def batch_process_pending_vectorization(db_path: str = DB_PATH) -> Dict[str, Any]:
+    """
+    自愈同步工具：当 8081 Embedding 服务恢复就绪后，对待处理队列里的 pending 文档一键补偿切片与特征向量，升级为 ingested 状态
+    """
+    pending_docs = get_pending_vectorization_documents(db_path)
+    if not pending_docs:
+        return {"status": "success", "count": 0, "message": "待处理队列为空"}
+
+    compute_client = LocalComputeKernelClient()
+    is_ready = await compute_client.check_embedding_service_health()
+    if not is_ready:
+        return {"status": "failed", "count": 0, "message": "Embedding 服务 (127.0.0.1:8081) 依然离线，无法启动处理"}
+
+    success_count = 0
+    failed_count = 0
+
+    for doc in pending_docs:
+        doc_id = doc["doc_id"]
+        title = doc["title"]
+        source_type = doc["source_type"]
+        full_text = doc.get("full_text_markdown") or ""
+        authors = doc.get("authors") or "Unknown"
+        canonical_url = doc.get("canonical_url") or ""
+
+        if not full_text.strip() and doc.get("local_path") and os.path.exists(doc["local_path"]):
+            ok = await ingest_pdf_to_v2(
+                doc_id=doc_id,
+                title=title,
+                pdf_path=doc["local_path"],
+                source_type=source_type,
+                authors=authors,
+                canonical_url=canonical_url,
+                db_path=db_path
+            )
+        else:
+            ok = await ingest_markdown_text_to_v2(
+                doc_id=doc_id,
+                title=title,
+                full_text_markdown=full_text,
+                source_type=source_type,
+                authors=authors,
+                canonical_url=canonical_url,
+                db_path=db_path
+            )
+
+        if ok:
+            success_count += 1
+        else:
+            failed_count += 1
+
+    return {
+        "status": "success",
+        "processed_count": success_count,
+        "failed_count": failed_count,
+        "total": len(pending_docs)
+    }
+
+
+def batch_process_pending_vectorization_sync(db_path: str = DB_PATH) -> Dict[str, Any]:
+    """batch_process_pending_vectorization 的同步封装"""
+    import concurrent.futures
+
+    async def _run():
+        return await batch_process_pending_vectorization(db_path)
 
     try:
         loop = asyncio.get_running_loop()
