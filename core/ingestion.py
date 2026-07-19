@@ -557,6 +557,17 @@ def ingest_pdf_to_v2_sync(
         return asyncio.run(_run())
 
 
+def split_text_into_chunks(text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
+    """通用的段落/字符滑动窗口切片工具"""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start += chunk_size - overlap
+    return chunks
+
+
 async def ingest_markdown_text_to_v2(
     doc_id: str,
     title: str,
@@ -580,7 +591,7 @@ async def ingest_markdown_text_to_v2(
         return False
 
     # 1. 文本级拆分分块
-    raw_chunks = chunk_text_by_tokens(full_text_markdown, chunk_size=800, overlap=100)
+    raw_chunks = split_text_into_chunks(full_text_markdown, chunk_size=800, overlap=100)
     compute_client = LocalComputeKernelClient()
     chunks_payload: List[Dict[str, Any]] = []
     vectors_list: List[List[float]] = []
