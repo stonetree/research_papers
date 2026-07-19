@@ -47,9 +47,9 @@ class LocalComputeKernelClient:
                                     return f_data.get("embedding")
                             logger.error(f"本地 Embedding 内核响应错误。HTTP: {resp.status}")
                 except asyncio.TimeoutError:
-                    logger.error("🚨 本地 Embedding 内核排队响应超时，触发平滑降级，返回空向量！")
+                    logger.warning("⚠️ 本地 Embedding 内核响应超时，将自动降级使用 FTS5 全文切片落库。")
                 except Exception as e:
-                    logger.error(f"🚨 本地 Embedding 内核连接异常: {str(e)}")
+                    logger.warning(f"⚠️ 本地 Embedding 内核 (127.0.0.1:8081) 离线或未启动 ({e})，将平滑降级使用 FTS5 全文切片落库。")
                 return None
 
     async def get_rerank_scores(self, query: str, documents: List[str]) -> List[float]:

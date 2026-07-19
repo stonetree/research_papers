@@ -227,34 +227,24 @@ def generate_daily_briefing_manually():
         folder_path = get_briefing_local_path("每日简报")
         success, path = save_to_local_file(folder_path, file_name, content)
         
-        # 将产生的原汁原味高端 Markdown 沉淀至系统 SQLite 数据表（完全对齐 documents & document_contents 表 Schema）
+        # 调用 V2 通用纯文本分块沉淀，全量构建 documents + document_contents + chunks + search_chunks(FTS5) + LanceDB(降级平滑)
         try:
-            import hashlib
-            from core.database import get_db_connection
-            conn = get_db_connection()
+            from core.ingestion import ingest_markdown_text_to_v2_sync
             doc_id = f"daily_brief_{date_str}"
-            now_iso = datetime.datetime.now().isoformat()
-            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            canonical_url = f"file://storage/briefings/daily_brief_{date_str}.md"
-            
-            conn.execute("""
-                INSERT OR REPLACE INTO documents (
-                    doc_id, source_type, title, canonical_url, local_path, 
-                    content_hash, origin_provider, discovery_provider, crawl_provider, 
-                    analysis_model, status, published_at, ingested_at
-                ) VALUES (?, 'daily_brief', ?, ?, ?, ?, 'local_fs', 'gemini_grounding', 'native', 'gemini-2.5-flash', 'ingested', ?, ?)
-            """, (doc_id, f"每日 AI 进展简报 ({date_str})", canonical_url, path, content_hash, now_iso, now_iso))
-            
-            conn.execute("""
-                INSERT OR REPLACE INTO document_contents (
-                    doc_id, full_text_markdown, ai_summary, structured_takeaways_json, evidence_json
-                ) VALUES (?, ?, ?, '[]', '[]')
-            """, (doc_id, content, content[:300]))
-            conn.commit()
-            conn.close()
-            print(f"[{datetime.datetime.now()}] 成功将每日简报同步沉淀至 SQLite 数据库 documents 表。")
+            ok = ingest_markdown_text_to_v2_sync(
+                doc_id=doc_id,
+                title=f"每日 AI 进展简报 ({date_str})",
+                full_text_markdown=content,
+                source_type="daily_brief",
+                authors="Google Gemini Grounding",
+                canonical_url=f"file://storage/briefings/daily_brief_{date_str}.md"
+            )
+            if ok:
+                print(f"[{datetime.datetime.now()}] 成功将每日简报全量分块沉淀至 V2 数据大仓与 FTS5 全文索引库。")
+            else:
+                print(f"[{datetime.datetime.now()}] 警告: 每日简报沉淀至 V2 返回 False。")
         except Exception as sync_ex:
-            print(f"同步简报至 SQLite 数据表发生异常: {sync_ex}")
+            print(f"同步简报至 V2 数据大仓发生异常: {sync_ex}")
             
         return success, content
     return False, content
@@ -285,34 +275,24 @@ def generate_weekly_insight_manually():
         folder_path = get_briefing_local_path("每周洞察报告")
         success, path = save_to_local_file(folder_path, file_name, content)
         
-        # 将产生的原汁原味高端 Markdown 周报沉淀至系统 SQLite 数据表（完全对齐 documents & document_contents 表 Schema）
+        # 调用 V2 通用纯文本分块沉淀，全量构建 documents + document_contents + chunks + search_chunks(FTS5) + LanceDB(降级平滑)
         try:
-            import hashlib
-            from core.database import get_db_connection
-            conn = get_db_connection()
+            from core.ingestion import ingest_markdown_text_to_v2_sync
             doc_id = f"weekly_insight_{date_str}"
-            now_iso = datetime.datetime.now().isoformat()
-            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            canonical_url = f"file://storage/briefings/weekly_insight_{date_str}.md"
-            
-            conn.execute("""
-                INSERT OR REPLACE INTO documents (
-                    doc_id, source_type, title, canonical_url, local_path, 
-                    content_hash, origin_provider, discovery_provider, crawl_provider, 
-                    analysis_model, status, published_at, ingested_at
-                ) VALUES (?, 'weekly_insight', ?, ?, ?, ?, 'local_fs', 'gemini_grounding', 'native', 'gemini-2.5-flash', 'ingested', ?, ?)
-            """, (doc_id, f"每周 AI 技术深入洞察 ({date_str})", canonical_url, path, content_hash, now_iso, now_iso))
-            
-            conn.execute("""
-                INSERT OR REPLACE INTO document_contents (
-                    doc_id, full_text_markdown, ai_summary, structured_takeaways_json, evidence_json
-                ) VALUES (?, ?, ?, '[]', '[]')
-            """, (doc_id, content, content[:300]))
-            conn.commit()
-            conn.close()
-            print(f"[{datetime.datetime.now()}] 成功将每周洞察同步沉淀至 SQLite 数据库 documents 表。")
+            ok = ingest_markdown_text_to_v2_sync(
+                doc_id=doc_id,
+                title=f"每周 AI 技术深入洞察 ({date_str})",
+                full_text_markdown=content,
+                source_type="weekly_insight",
+                authors="Google Gemini Grounding",
+                canonical_url=f"file://storage/briefings/weekly_insight_{date_str}.md"
+            )
+            if ok:
+                print(f"[{datetime.datetime.now()}] 成功将每周洞察全量分块沉淀至 V2 数据大仓与 FTS5 全文索引库。")
+            else:
+                print(f"[{datetime.datetime.now()}] 警告: 每周洞察沉淀至 V2 返回 False。")
         except Exception as sync_ex:
-            print(f"同步周报至 SQLite 数据表发生异常: {sync_ex}")
+            print(f"同步周报至 V2 数据大仓发生异常: {sync_ex}")
             
         return success, content
     return False, content

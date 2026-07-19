@@ -555,3 +555,134 @@ def ingest_pdf_to_v2_sync(
             return future.result()
     else:
         return asyncio.run(_run())
+
+
+async def ingest_markdown_text_to_v2(
+    doc_id: str,
+    title: str,
+    full_text_markdown: str,
+    source_type: str = "daily_brief",
+    authors: str = "AI Radar Engine",
+    canonical_url: str = "",
+    db_path: str = DB_PATH
+) -> bool:
+    """
+    将任意 Markdown 纯文本（简报、洞察报告、抓取博文等）完成文本切片并注入 V2 检索层
+    （documents + document_contents + chunks + search_chunks + LanceDB）。
+    当 Embedding 离线时自动填入零向量平滑降级，保证 100% 成功写入 SQLite 与 FTS5。
+    """
+    import aiosqlite
+    import os
+    import numpy as np
+
+    if not full_text_markdown.strip():
+        logger.warning(f"V2 文本内容为空，取消摄取: doc_id={doc_id}")
+        return False
+
+    # 1. 文本级拆分分块
+    raw_chunks = chunk_text_by_tokens(full_text_markdown, chunk_size=800, overlap=100)
+    compute_client = LocalComputeKernelClient()
+    chunks_payload: List[Dict[str, Any]] = []
+    vectors_list: List[List[float]] = []
+
+    for text_block in raw_chunks:
+        if not text_block.strip():
+            continue
+        text_hash = hashlib.md5(text_block.encode("utf-8")).hexdigest()
+        try:
+            vec = await compute_client.get_embedding(text_block[:600])
+        except Exception:
+            vec = None
+            
+        if not vec:
+            vec = list(np.zeros(VECTOR_DIM).astype(float))
+            logger.info(f"💡 [Embedding 离线降级] 自动填入全零向量并正常沉淀 FTS5 全文切片 (doc_id={doc_id})")
+
+        chunks_payload.append({
+            "text": text_block,
+            "token_count": len(text_block) // 4,
+            "text_hash": text_hash,
+            "section_path": f"§ {title[:30]}",
+            "page_number": 1
+        })
+        vectors_list.append(vec)
+
+    if not chunks_payload:
+        logger.error(f"V2 文本切片为空，放弃摄取: doc_id={doc_id}")
+        return False
+
+    if not canonical_url:
+        canonical_url = f"file://storage/briefings/{doc_id}.md"
+
+    content_hash = hashlib.sha256(full_text_markdown.encode("utf-8")).hexdigest()
+
+    doc_payload = {
+        "doc_id": doc_id,
+        "source_type": source_type,
+        "title": title,
+        "authors": authors,
+        "canonical_url": canonical_url,
+        "local_path": "",
+        "content_hash": content_hash,
+        "origin_provider": "local_fs",
+        "discovery_provider": "gemini_grounding",
+        "crawl_provider": "native",
+        "analysis_model": "gemini-2.5-flash",
+        "status": "ingested",
+        "llm_score": 9.0,
+        "score_reason_json": "{}",
+        "scored_by_model": "system",
+        "published_at": datetime.now().isoformat(),
+        "license_hint": "open_access",
+        "ai_summary": full_text_markdown[:400]
+    }
+
+    coordinator = IngestionCoordinator(db_path)
+    try:
+        success = await coordinator.execute_2pc_ingestion(
+            doc_payload=doc_payload,
+            chunks_payload=chunks_payload,
+            vectors_list=vectors_list
+        )
+        if success:
+            logger.info(f"✅ V2 纯文本切片摄取成功：doc_id={doc_id}，共 {len(chunks_payload)} 个切片。")
+        return success
+    except Exception as e:
+        logger.critical(f"❌ V2 纯文本摄取异常：doc_id={doc_id}，错误: {e}")
+        return False
+
+
+def ingest_markdown_text_to_v2_sync(
+    doc_id: str,
+    title: str,
+    full_text_markdown: str,
+    source_type: str = "daily_brief",
+    authors: str = "AI Radar Engine",
+    canonical_url: str = "",
+    db_path: str = DB_PATH
+) -> bool:
+    """ingest_markdown_text_to_v2 的同步封装"""
+    import concurrent.futures
+
+    async def _run():
+        return await ingest_markdown_text_to_v2(
+            doc_id=doc_id,
+            title=title,
+            full_text_markdown=full_text_markdown,
+            source_type=source_type,
+            authors=authors,
+            canonical_url=canonical_url,
+            db_path=db_path
+        )
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, _run())
+            return future.result()
+    else:
+        return asyncio.run(_run())
