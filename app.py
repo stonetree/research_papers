@@ -1457,6 +1457,71 @@ with tab_global_config:
         )
         
         st.markdown("---")
+        st.markdown("### 📦 V2 向量数据库与混合索引库管理")
+        from core.library_scanner import get_papers_pending_v2_ingestion
+        from core.ingestion import ingest_pdf_to_v2_sync
+        from core.database import resolve_pdf_path
+        
+        pending_papers = get_papers_pending_v2_ingestion()
+        pending_count = len(pending_papers)
+        
+        if pending_count > 0:
+            st.warning(f"⚠️ **检测到 {pending_count} 篇历史存量文献未构建 V2 向量与 FTS5 混合索引库**。建议一键同步以启用高阶 RAG 搜索。")
+            with st.expander(f"📋 查看待同步的 {pending_count} 篇文献清单"):
+                for idx_p, p in enumerate(pending_papers[:10]):
+                    st.caption(f"{idx_p+1}. `{p['paper_id']}` — {p['title']}")
+                if pending_count > 10:
+                    st.caption(f"...等共 {pending_count} 篇")
+                    
+            col_b1, col_b2 = st.columns([1.2, 1])
+            with col_b1:
+                run_sync = st.button("⚡ 一键无缝构建 V2 检索大仓", type="primary", key="ui_run_v2_sync_btn", width="stretch")
+            with col_b2:
+                skip_embed = st.checkbox("⚡ 快速构建（跳过 Embedding）", value=False, key="ui_skip_embed_chk", help="开启此选项跳过向量提取，但依然可秒级构建 FTS5 全文索引")
+                
+            if run_sync:
+                progress_bar = st.progress(0.0)
+                status_text = st.empty()
+                success_count = 0
+                failed_count = 0
+                
+                for idx_p, paper in enumerate(pending_papers):
+                    status_text.markdown(f"⏳ **正在构建 [{idx_p+1}/{pending_count}]**: `{paper['title'][:35]}...`")
+                    p_id = paper["paper_id"]
+                    p_title = paper["title"]
+                    p_path = resolve_pdf_path(paper.get("pdf_path", ""))
+                    p_authors = paper.get("authors", "手动导入 (Local Import)") or "手动导入 (Local Import)"
+                    p_summary = paper.get("dialectical_analysis", "") or ""
+                    
+                    if p_path and os.path.exists(p_path):
+                        try:
+                            ok = ingest_pdf_to_v2_sync(
+                                doc_id=p_id,
+                                title=p_title,
+                                pdf_path=p_path,
+                                source_type="local_pdf",
+                                authors=p_authors,
+                                ai_summary=p_summary
+                            )
+                            if ok:
+                                success_count += 1
+                            else:
+                                failed_count += 1
+                        except Exception as e:
+                            failed_count += 1
+                    else:
+                        failed_count += 1
+                        
+                    progress_bar.progress((idx_p + 1) / pending_count)
+                    
+                status_text.empty()
+                st.success(f"🎉 V2 索引库同步构建完成！成功: {success_count} 篇 | 失败: {failed_count} 篇。")
+                st.toast("🟢 V2 混合检索索引库全量构建完成！")
+                st.rerun()
+        else:
+            st.success("🟢 **所有存量论文与 AI 剖析报告均已注入 V2 向量数据库及 FTS5 索引库**！物理大仓保持 100% 同步。")
+            
+        st.markdown("---")
         st.markdown("### 🤖 系统AI脑区分配与兼容性诊断")
         
         model_keys = list(api_models.keys())
