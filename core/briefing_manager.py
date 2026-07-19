@@ -114,12 +114,13 @@ def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
             
             candidate = json_data['candidates'][0]
             
-            # 提取并检验联网元数据 Grounding Metadata
-            grounding_metadata = candidate.get('grounding_metadata', {})
-            web_search_queries = grounding_metadata.get('web_search_queries', [])
+            # 提取并检验联网元数据 Grounding Metadata (兼容 Gemini REST API 的驼峰体与下划线命名)
+            grounding_metadata = candidate.get('groundingMetadata') or candidate.get('grounding_metadata') or {}
+            web_search_queries = grounding_metadata.get('webSearchQueries') or grounding_metadata.get('web_search_queries') or []
+            search_chunks = grounding_metadata.get('groundingChunks') or grounding_metadata.get('searchChunks') or grounding_metadata.get('search_chunks') or []
             
-            if web_search_queries:
-                print(f"[{datetime.datetime.now()}] [成功联网] 触发的搜索关键词为: {web_search_queries}")
+            if web_search_queries or search_chunks:
+                print(f"[{datetime.datetime.now()}] [成功联网] 触发的搜索关键词: {web_search_queries or '已抓取全网最新动态'}")
             else:
                 print(f"[{datetime.datetime.now()}] [警告] Gemini 未触发联网搜索，可能使用了内部陈旧知识回答！")
                 
@@ -226,7 +227,7 @@ def generate_daily_briefing_manually():
         folder_path = get_briefing_local_path("每日简报")
         success, path = save_to_local_file(folder_path, file_name, content)
         
-        # 将产生的原汁原味高端 Markdown 沉淀至系统 SQLite 数据表（完全对齐 documents 表 Schema）
+        # 将产生的原汁原味高端 Markdown 沉淀至系统 SQLite 数据表（完全对齐 documents & document_contents 表 Schema）
         try:
             import hashlib
             from core.database import get_db_connection
@@ -245,9 +246,10 @@ def generate_daily_briefing_manually():
             """, (doc_id, f"每日 AI 进展简报 ({date_str})", canonical_url, path, content_hash, now_iso, now_iso))
             
             conn.execute("""
-                INSERT OR REPLACE INTO document_contents (doc_id, full_text_markdown, updated_at)
-                VALUES (?, ?, ?)
-            """, (doc_id, content, now_iso))
+                INSERT OR REPLACE INTO document_contents (
+                    doc_id, full_text_markdown, ai_summary, structured_takeaways_json, evidence_json
+                ) VALUES (?, ?, ?, '[]', '[]')
+            """, (doc_id, content, content[:300]))
             conn.commit()
             conn.close()
             print(f"[{datetime.datetime.now()}] 成功将每日简报同步沉淀至 SQLite 数据库 documents 表。")
@@ -283,7 +285,7 @@ def generate_weekly_insight_manually():
         folder_path = get_briefing_local_path("每周洞察报告")
         success, path = save_to_local_file(folder_path, file_name, content)
         
-        # 将产生的原汁原味高端 Markdown 周报沉淀至系统 SQLite 数据表（完全对齐 documents 表 Schema）
+        # 将产生的原汁原味高端 Markdown 周报沉淀至系统 SQLite 数据表（完全对齐 documents & document_contents 表 Schema）
         try:
             import hashlib
             from core.database import get_db_connection
@@ -302,9 +304,10 @@ def generate_weekly_insight_manually():
             """, (doc_id, f"每周 AI 技术深入洞察 ({date_str})", canonical_url, path, content_hash, now_iso, now_iso))
             
             conn.execute("""
-                INSERT OR REPLACE INTO document_contents (doc_id, full_text_markdown, updated_at)
-                VALUES (?, ?, ?)
-            """, (doc_id, content, now_iso))
+                INSERT OR REPLACE INTO document_contents (
+                    doc_id, full_text_markdown, ai_summary, structured_takeaways_json, evidence_json
+                ) VALUES (?, ?, ?, '[]', '[]')
+            """, (doc_id, content, content[:300]))
             conn.commit()
             conn.close()
             print(f"[{datetime.datetime.now()}] 成功将每周洞察同步沉淀至 SQLite 数据库 documents 表。")
