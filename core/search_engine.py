@@ -361,6 +361,7 @@ async def execute_unified_studio_search_flow(
     query: str,
     filter_type: str = "ext_blog",
     force_penetrate: bool = False,
+    allow_web_search: bool = True,
     model_id: str = "qwen3.7-max",
     on_progress = None
 ) -> Dict[str, Any]:
@@ -375,12 +376,21 @@ async def execute_unified_studio_search_flow(
     # 判定本地最高评分是否击穿置信度门槛 (RRF 复合得分 > 0.04)
     has_high_confidence_local_hit = len(local_evidences) > 0 and local_evidences[0]["hybrid_score"] > 0.04
     
-    if has_high_confidence_local_hit and not force_penetrate:
-        logger.info("🎯 本地知识大仓高置信度精确命中！执行 0 成本本地解答合成。")
-        if on_progress:
-            on_progress("🎯 本地知识大仓高置信度命中！正在执行零成本本地解答合成...")
+    # 路由判定：
+    # 若 (本地高置信度命中 且 未开启强制穿透) 或 选项已关闭联网检索 (allow_web_search=False)
+    # 则完全使用本地知识大仓结果；否则触发联网打捞。
+    if (has_high_confidence_local_hit and not force_penetrate) or not allow_web_search:
+        if not allow_web_search:
+            logger.info("🔒 联网检索已被选项关闭，直接使用本地知识大仓进行解答合成。")
+            if on_progress:
+                on_progress("🔒 联网检索已被选项关闭，直接使用本地大仓进行解答合成...")
+            routing_path = "local_only"
+        else:
+            logger.info("🎯 本地知识大仓高置信度精确命中！执行 0 成本本地解答合成。")
+            if on_progress:
+                on_progress("🎯 本地知识大仓高置信度命中！正在执行零成本本地解答合成...")
+            routing_path = "local_cache_hit"
         evidence_payload = local_evidences
-        routing_path = "local_cache_hit"
     else:
         logger.warning("🔍 本地大仓未检索到相关高密细节，或者用户开启强力穿透打捞！启动 Exa 神经网络精准打捞...")
         if on_progress:

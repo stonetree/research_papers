@@ -759,7 +759,7 @@ with tab_model_search:
 
     # 配置区
     with st.container(border=True):
-        col_query_in, col_filter, col_penetrate = st.columns([2.5, 1.2, 1.3])
+        col_query_in, col_filter, col_web, col_penetrate = st.columns([2.2, 1.1, 1.2, 1.2])
         with col_query_in:
             model_query = st.text_input(
                 "输入您关心的技术关键词/提问 Query", 
@@ -779,11 +779,18 @@ with tab_model_search:
                 index=0,
                 key="model_search_filter_selector"
             )
+        with col_web:
+            allow_web_search = st.checkbox(
+                "🌐 允许联网打捞",
+                value=True,
+                help="关闭后仅使用本地知识大仓进行检索与解答，绝对不消耗任何联网抓取与外部 API 配额"
+            )
         with col_penetrate:
             force_penetrate = st.checkbox(
                 "🔥 强制穿透外部打捞",
                 value=False,
-                help="即使本地大仓存在高置信度匹配，依然强制发起 Exa 外部联网打捞"
+                disabled=not allow_web_search,
+                help="即使本地大仓存在高置信度匹配，依然强制发起 Exa 外部联网打捞（需要开启允许联网打捞）"
             )
 
         trigger_search = st.button("🚀 启动 AI 联网学术探测", type="primary", width="stretch")
@@ -805,6 +812,7 @@ with tab_model_search:
                           query=model_query.strip(),
                           filter_type=target_filter,
                           force_penetrate=force_penetrate,
+                          allow_web_search=allow_web_search,
                           model_id=selected_online_search_model_id,
                           on_progress=update_progress
                       ))
@@ -844,6 +852,8 @@ with tab_model_search:
             path = search_res.get("routing_path", "")
             if path == "local_cache_hit":
                 st.success("🎯 **检索路径诊断**：本地大仓高置信度精确命中！执行 0 成本本地解答合成。")
+            elif path == "local_only":
+                st.info("🔒 **检索路径诊断**：联网检索已被选项关闭，限定仅使用本地大仓（FTS5 + LanceDB 向量）进行检索与解答合成。")
             elif path == "exa_penetrate_funnel":
                 st.warning("🔍 **检索路径诊断**：本地大仓未完全覆盖，或者开启了强制穿透。已启动 Exa 神经网络打捞，并将最新成果 2PC 沉淀落库。")
             else:
