@@ -1635,8 +1635,9 @@ with tab_global_config:
             help="进行联网学术搜索时使用的模型。支持原生 responses 端点，也支持任何标准 Chat 端口模型 (框架将自动调用 Exa/Firecrawl 搜集全网学术文献切片并注入 Prompt)。"
         )
         
+        from core.config_loader import get_model_config
         from core.detection import model_supports_web_search, can_be_used_for_web_search
-        search_cfg = api_models.get(selected_search_brain, {})
+        search_cfg = get_model_config(selected_search_brain) or api_models.get(selected_search_brain, {})
         if model_supports_web_search(search_cfg):
             st.markdown("<p style='color: #10B981; font-size: 0.88rem; margin-top: -10px; margin-bottom: 15px;'>🟢 路径 A：原生 Response 联网路径 (使用 API 端点内置工具联网)</p>", unsafe_allow_html=True)
         elif can_be_used_for_web_search(search_cfg):

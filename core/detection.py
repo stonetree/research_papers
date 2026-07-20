@@ -14,16 +14,19 @@ def model_supports_web_search(cfg):
 def can_be_used_for_web_search(cfg):
     """
     判断一个模型是否可以配置为 AI 联网学术探测大脑。
-    双路径支持规则：
-    - 路径 A: 原生 responses 端点 (使用模型原生的工具联网)
-    - 路径 B: 标准 Chat 端口模型 (框架自动驱动 Exa/Firecrawl 全网搜集学术文献切片并注入 Prompt 上下文)
-    只要配置了合法的 API Key 与 URL，均允许配置使用。
+    自动兼容配置文件中的 api_key、resolved_api_key 以及 api_key_env 环境变量/注册表回退。
     """
     if not cfg:
         return False
-    api_key = cfg.get("resolved_api_key") or cfg.get("api_key")
-    url = cfg.get("url")
-    provider = cfg.get("provider")
+    from .env_helper import get_env_var
+    api_key = (cfg.get("resolved_api_key") or cfg.get("api_key") or "").strip()
+    if not api_key:
+        env_var = cfg.get("api_key_env", "")
+        if env_var:
+            api_key = get_env_var(env_var, "").strip()
+
+    url = cfg.get("url", "").strip()
+    provider = cfg.get("provider", "")
     if provider == "gemini" and api_key:
         return True
     return bool(api_key and url)
