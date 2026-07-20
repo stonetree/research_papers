@@ -227,11 +227,11 @@ def generate_daily_briefing_manually():
         folder_path = get_briefing_local_path("每日简报")
         success, path = save_to_local_file(folder_path, file_name, content)
         
-        # 调用 V2 通用纯文本分块沉淀，全量构建 documents + document_contents + chunks + search_chunks(FTS5) + LanceDB(降级平滑)
+        # 调用 V2 通用纯文本分块沉淀，全量构建 documents + document_contents + chunks + search_chunks(FTS5) + LanceDB
         try:
             from core.ingestion import ingest_markdown_text_to_v2_sync
             doc_id = f"daily_brief_{date_str}"
-            ok = ingest_markdown_text_to_v2_sync(
+            status_res = ingest_markdown_text_to_v2_sync(
                 doc_id=doc_id,
                 title=f"每日 AI 进展简报 ({date_str})",
                 full_text_markdown=content,
@@ -239,10 +239,12 @@ def generate_daily_briefing_manually():
                 authors="Google Gemini Grounding",
                 canonical_url=f"file://storage/briefings/daily_brief_{date_str}.md"
             )
-            if ok:
-                print(f"[{datetime.datetime.now()}] 成功将每日简报全量分块沉淀至 V2 数据大仓与 FTS5 全文索引库。")
+            if status_res == "ingested":
+                print(f"[{datetime.datetime.now()}] 成功将每日简报全量分块向量化沉淀至 V2 数据大仓与 LanceDB 向量库。")
+            elif status_res == "pending":
+                print(f"[{datetime.datetime.now()}] ⚠️ 每日简报生成完毕，但由于 Embedding 服务 (127.0.0.1:8081) 未启动，已自动存储全文本并进入【待向量化队列】(status='pending')。开启服务后可一键同步！")
             else:
-                print(f"[{datetime.datetime.now()}] 警告: 每日简报沉淀至 V2 返回 False。")
+                print(f"[{datetime.datetime.now()}] 警告: 每日简报沉淀至 V2 发生失败。")
         except Exception as sync_ex:
             print(f"同步简报至 V2 数据大仓发生异常: {sync_ex}")
             
@@ -275,11 +277,11 @@ def generate_weekly_insight_manually():
         folder_path = get_briefing_local_path("每周洞察报告")
         success, path = save_to_local_file(folder_path, file_name, content)
         
-        # 调用 V2 通用纯文本分块沉淀，全量构建 documents + document_contents + chunks + search_chunks(FTS5) + LanceDB(降级平滑)
+        # 调用 V2 通用纯文本分块沉淀，全量构建 documents + document_contents + chunks + search_chunks(FTS5) + LanceDB
         try:
             from core.ingestion import ingest_markdown_text_to_v2_sync
             doc_id = f"weekly_insight_{date_str}"
-            ok = ingest_markdown_text_to_v2_sync(
+            status_res = ingest_markdown_text_to_v2_sync(
                 doc_id=doc_id,
                 title=f"每周 AI 技术深入洞察 ({date_str})",
                 full_text_markdown=content,
@@ -287,10 +289,12 @@ def generate_weekly_insight_manually():
                 authors="Google Gemini Grounding",
                 canonical_url=f"file://storage/briefings/weekly_insight_{date_str}.md"
             )
-            if ok:
-                print(f"[{datetime.datetime.now()}] 成功将每周洞察全量分块沉淀至 V2 数据大仓与 FTS5 全文索引库。")
+            if status_res == "ingested":
+                print(f"[{datetime.datetime.now()}] 成功将每周洞察全量分块向量化沉淀至 V2 数据大仓与 LanceDB 向量库。")
+            elif status_res == "pending":
+                print(f"[{datetime.datetime.now()}] ⚠️ 每周洞察生成完毕，但由于 Embedding 服务 (127.0.0.1:8081) 未启动，已自动存储全文本并进入【待向量化队列】(status='pending')。开启服务后可一键同步！")
             else:
-                print(f"[{datetime.datetime.now()}] 警告: 每周洞察沉淀至 V2 返回 False。")
+                print(f"[{datetime.datetime.now()}] 警告: 每周洞察沉淀至 V2 发生失败。")
         except Exception as sync_ex:
             print(f"同步周报至 V2 数据大仓发生异常: {sync_ex}")
             

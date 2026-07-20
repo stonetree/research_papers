@@ -124,10 +124,11 @@ class IngestionCoordinator:
             (doc_id, doc_payload['full_text_markdown'], doc_payload['ai_summary'], doc_payload['structured_takeaways_json'], doc_payload['evidence_json'])
         ))
         
-        # 释放锁定，变更为 ingested
+        # 释放锁定，变更文档终态
+        target_status = doc_payload.get('status', 'ingested')
         commit_sql_pipeline.append((
-            "UPDATE documents SET status = 'ingested', llm_score = ?, score_reason_json = ?, scored_by_model = ?, scored_at = CURRENT_TIMESTAMP WHERE doc_id = ?",
-            (doc_payload.get('llm_score', 0.0), doc_payload.get('score_reason_json', '{}'), doc_payload.get('scored_by_model', 'deepseek-v4-flash'), doc_id)
+            "UPDATE documents SET status = ?, llm_score = ?, score_reason_json = ?, scored_by_model = ?, scored_at = CURRENT_TIMESTAMP WHERE doc_id = ?",
+            (target_status, doc_payload.get('llm_score', 0.0), doc_payload.get('score_reason_json', '{}'), doc_payload.get('scored_by_model', 'deepseek-v4-flash'), doc_id)
         ))
 
         try:
@@ -437,8 +438,37 @@ async def ingest_pdf_to_v2(
         raw_chunks.append(raw_text[start: start + chunk_size])
         start += chunk_size - overlap
 
-    # --- 向量化（带降级零向量） ---
+    # --- 检查 8081 Embedding 是否处于 Ready 就绪状态 ---
     compute_client = LocalComputeKernelClient()
+    is_embedding_ready = await compute_client.check_embedding_service_health()
+    if not is_embedding_ready:
+        logger.warning(f"⚠️ [Embedding 127.0.0.1:8081 离线] PDF doc_id={doc_id} 的全文本已写入 SQLite (status='pending')，安全挂起等待就绪。")
+        writer = WriteWorker(db_path)
+        content_hash = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
+        if not canonical_url:
+            canonical_url = f"file://{os.path.abspath(pdf_path)}"
+        now_iso = datetime.now().isoformat()
+        
+        sql_pipeline = [
+            (
+                """INSERT OR REPLACE INTO documents (
+                    doc_id, source_type, title, authors, canonical_url, local_path, 
+                    content_hash, origin_provider, discovery_provider, crawl_provider, 
+                    analysis_model, status, published_at, ingested_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'manual', 'manual', 'native', 'deepseek-v4-flash', 'pending', ?, ?)""",
+                (doc_id, source_type, title, authors, canonical_url, pdf_path, content_hash, now_iso, now_iso)
+            ),
+            (
+                """INSERT OR REPLACE INTO document_contents (
+                    doc_id, full_text_markdown, ai_summary, structured_takeaways_json, evidence_json
+                ) VALUES (?, ?, ?, '[]', '[]')""",
+                (doc_id, full_text, ai_summary or full_text[:400])
+            )
+        ]
+        await writer.execute_write(sql_pipeline)
+        return "pending"
+
+    # --- 向量化特征提取 ---
     chunks_payload: List[Dict[str, Any]] = []
     vectors_list: List[List[float]] = []
 
@@ -450,10 +480,10 @@ async def ingest_pdf_to_v2(
             vec = await compute_client.get_embedding(text_block[:600])
         except Exception:
             vec = None
+
         if not vec:
-            import numpy as np
-            vec = list(np.zeros(VECTOR_DIM).astype(float))
-            logger.warning(f"Embedding 降级为零向量 (doc_id={doc_id})")
+            logger.warning(f"⚠️ 局部切片特征提取失败，文档挂起为 pending 等待重试: doc_id={doc_id}")
+            return "pending"
 
         chunks_payload.append({
             "text": text_block,
@@ -589,9 +619,10 @@ async def ingest_markdown_text_to_v2(
 
     if not full_text_markdown.strip():
         logger.warning(f"V2 文本内容为空，取消摄取: doc_id={doc_id}")
-        return False
+        return "failed"
 
     # 检查 Embedding 是否处于 Ready 就绪状态
+    compute_client = LocalComputeKernelClient()
     is_embedding_ready = await compute_client.check_embedding_service_health()
     if not is_embedding_ready:
         logger.warning(f"⚠️ [Embedding 127.0.0.1:8081 离线] doc_id={doc_id} 的全文本已写入 SQLite (status='pending')，安全挂起等待就绪。")
@@ -618,7 +649,7 @@ async def ingest_markdown_text_to_v2(
             )
         ]
         await writer.execute_write(sql_pipeline)
-        return True
+        return "pending"
 
     # 1. 文本级拆分分块
     raw_chunks = split_text_into_chunks(full_text_markdown, chunk_size=800, overlap=100)
@@ -689,10 +720,11 @@ async def ingest_markdown_text_to_v2(
         )
         if success:
             logger.info(f"✅ V2 纯文本切片摄取成功：doc_id={doc_id}，共 {len(chunks_payload)} 个切片。")
-        return success
+            return "ingested"
+        return "failed"
     except Exception as e:
         logger.critical(f"❌ V2 纯文本摄取异常：doc_id={doc_id}，错误: {e}")
-        return False
+        return "failed"
 
 
 def ingest_markdown_text_to_v2_sync(
