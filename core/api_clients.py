@@ -36,6 +36,11 @@ class LocalComputeKernelClient:
         except Exception:
             return False
 
+    @staticmethod
+    def check_service_health_sync() -> bool:
+        """类静态同步版本的 8081 Embedding 服务心跳健康探测"""
+        return check_embedding_service_health_sync()
+
     async def get_embedding(self, text: str) -> Optional[List[float]]:
         """
         向本地 8081 端口获取高维稠密特征向量

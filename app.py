@@ -253,7 +253,12 @@ st.sidebar.markdown("---")
 # 🔌 系统诊断与状态
 st.sidebar.subheader("🔌 系统诊断与状态")
 
-from core.api_clients import check_embedding_service_health_sync
+try:
+    from core.api_clients import check_embedding_service_health_sync
+except ImportError:
+    from core.api_clients import LocalComputeKernelClient
+    check_embedding_service_health_sync = LocalComputeKernelClient.check_service_health_sync
+
 from core.ingestion import get_pending_vectorization_documents, batch_process_pending_vectorization_sync
 
 is_embed_ready = check_embedding_service_health_sync()
