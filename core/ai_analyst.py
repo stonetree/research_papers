@@ -226,9 +226,9 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
             "从第一性原理出发，重新评估 Host CPU 在该架构中的角色演进：\n"
             "- **从“纯控制面”到“混合计算面”**：在这篇论文的设计中，Host CPU 仅仅充当传统慢速搬运的“指挥官（控制面）”，还是深度参与了数据计算（计算面）？\n"
             "- **现代 CPU 指令集硬件红利**：论文是否充分压榨了最新 Host CPU 架构的硬件基础设施潜力？例如：\n"
-            "  - 是否利用了 **Intel AMX / AVX-512** 或 **ARM SVE/SVE2（如鲲鹏架构）** 的高性能矢量/矩阵指令集，在 Host 侧原地执行 $KV\ Cache$ 的高性能量化与解量化（INT4/FP4/FP8）？\n"
+                      r"  - 是否利用了 **Intel AMX / AVX-512** 或 **ARM SVE/SVE2（如鲲鹏架构）** 的高性能矢量/矩阵指令集，在 Host 侧原地执行 $KV\ Cache$ 的高性能量化与解量化（INT4/FP4/FP8）？\n"
             "  - 是否利用了特定的现代 ARM 特性来加速地址转译或内存屏障？\n"
-            "- **算力抢占与生存空间（生态位）**：当 CPU 满载执行 $KV\ Cache$ 压缩、内存置换或 Agent 的沙箱安全审计时，其对 Host 服务器其他常驻进程（如 OS 任务调度、网络 IO 驱动）的算力抢占效应如何？在真实的工业生产集群中，它处于什么生态位？\n\n"
+            r"- **算力抢占与生存空间（生态位）**：当 CPU 满载执行 $KV\ Cache$ 压缩、内存置换或 Agent 的沙箱安全审计时，其对 Host 服务器其他常驻进程（如 OS 任务调度、网络 IO 驱动）的算力抢占效应如何？在真实的工业生产集群中，它处于什么生态位？\n\n"
             "### 4. ⚖️ 【科学批判：消融实验去伪存真与落地壁垒】\n"
             "请站在绝对中立、严苛批判的视角，挑剔地审视论文的硬伤：\n"
             "- **实验水分审计**：其对比的基线（Baselines）是否故意选择了过时的软件版本（如拿最新优化去对比未开启 PagedAttention 的早起 baseline）？其测试数据集是否属于“精挑细选的理想封闭场景（Cherry-picked）”？\n"
@@ -603,7 +603,12 @@ def arbitrate_papers(candidates, topic_name, model_id):
     return []
 
 def model_web_search(query_string, model_id):
-    """通过大模型的联网搜索工具直接查找论文，返回 (success, papers_list)"""
+    """
+    通过 AI 联网学术探测大脑查找最新学术论文，返回 (success, papers_list)。
+    双路径架构支持：
+    - 路径 A: API Endpoint 包含 /responses 或原生支持 Grounding 联网工具；
+    - 路径 B: 标准通用 Chat 端口模型，框架自动调用 Exa 预抓取全网学术文献 highlights 切片并注入 Prompt 上下文。
+    """
     cfg = get_model_config(model_id)
     if not cfg:
         return False, f"未在 API 配置文件中找到模型标识为 '{model_id}' 的配置。"
@@ -616,31 +621,79 @@ def model_web_search(query_string, model_id):
     if not api_key:
         return False, "未配置 API Key。"
         
-    if not api_url:
+    if provider != "gemini" and not api_url:
         return False, "未配置 API URL。"
-        
+
+    is_native_response = bool(api_url and "/responses" in api_url)
+    
+    exa_context_text = ""
+    if not is_native_response:
+        # === 路径 B 触发：通用 Chat 端口，启动 Exa 神经网络预先全网搜集学术文献 ===
+        print(f"🌐 [路径 B 触发] 当前配置为标准 Chat 端口模型 ({model_name})，框架自动调用 Exa 神经网络进行前沿打捞...")
+        try:
+            from core.api_clients import ExaApiClient
+            exa = ExaApiClient()
+            include_domains = [
+                "arxiv.org", "semanticscholar.org", "biorxiv.org", "medrxiv.org",
+                "pubmed.ncbi.nlm.nih.gov", "researchgate.net", "ieeexplore.ieee.org",
+                "dl.acm.org", "link.springer.com", "sciencedirect.com", "nature.com"
+            ]
+            import asyncio
+            import concurrent.futures
+            async def _do_exa():
+                return await exa.search_and_extract_highlights(
+                    query_string,
+                    num_results=6,
+                    include_domains=include_domains,
+                    category="research paper"
+                )
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    exa_res = pool.submit(asyncio.run, _do_exa()).result()
+            else:
+                exa_res = asyncio.run(_do_exa())
+
+            results = exa_res.get("results", [])
+            for idx, r in enumerate(results):
+                exa_context_text += f"[全网打捞文献片段 {idx+1}]\n"
+                exa_context_text += f"- 标题: {r.get('title', 'Unknown Title')}\n"
+                exa_context_text += f"- direct URL: {r.get('url', '')}\n"
+                exa_context_text += f"- 核心亮点: {r.get('highlights') or r.get('text', '')[:450]}\n\n"
+            print(f"🟢 [Exa 打捞完成] 成功搜集到 {len(results)} 条实效文献数据切片，注入 Chat 大模型 Prompt。")
+        except Exception as exa_e:
+            print(f"⚠️ [Exa 预打捞警告] 启发式打捞发生非阻断异常 ({exa_e})，直接将 Query 发送给大模型。")
+
     system_instruction = (
         "你是一个极其严谨的 AI 首席科学家与顶尖科研检索专家。\n"
-        "请联网检索关于用户指定主题的最新、最核心、高质量的学术论文（如来自于 OSDI, SOSP, ASPLOS, ISCA, VLDB, arXiv 等）。\n"
+        "请结合提供的【全网实时打捞学术文献上下文】以及最前沿学术研讨，总结推荐 5-8 篇关于用户指定主题的最相关、最高质量的学术论文（来自于 OSDI, SOSP, ASPLOS, ISCA, VLDB, arXiv 等）。\n"
         "请必须返回 5-8 篇最相关的论文，且必须仅以一个标准的 JSON 数组格式输出，不要包含任何额外的解释性文字、前缀或后缀。\n"
         "JSON 数组中的每个对象必须包含以下字段：\n"
         "1. \"title\": 论文标题\n"
         "2. \"authors\": 作者团队\n"
         "3. \"year_venue\": 发表年份与会议/期刊名称 (例如 'ASPLOS 2025' 或 'arXiv 2026')\n"
         "4. \"summary\": 核心技术创新点与贡献简述\n"
-        "5. \"url\": 论文的 PDF 下载链接或官方访问链接 (尽可能提供 direct PDF 链接)\n"
+        "5. \"url\": 论文的 PDF 下载链接或官方访问链接 (若上下文中有 direct URL 请优先原样引用)\n"
         "不要返回其他任何非 JSON 的文本！直接返回一个标准的 JSON 数组。"
     )
     
+    user_prompt = f"请检索最新、高质量的学术文献，技术主题是：{query_string}\n\n"
+    if exa_context_text:
+        user_prompt += f"【全网实时打捞学术文献上下文】:\n{exa_context_text}"
+
     messages = [
         {"role": "system", "content": system_instruction},
-        {"role": "user", "content": f"请联网检索最新、高质量的学术文献，技术主题是：{query_string}"}
+        {"role": "user", "content": user_prompt}
     ]
     
     try:
         response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=3600, custom_params=cfg.get("custom_params"))
         if response.status_code == 200:
-            content, err = parse_llm_response(response, "/responses" in api_url)
+            content, err = parse_llm_response(response, is_native_response)
             if not err and content:
                 import json
                 cleaned = clean_json_string(content)

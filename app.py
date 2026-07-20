@@ -1632,15 +1632,17 @@ with tab_global_config:
             index=search_index,
             format_func=lambda x: api_models[x].get("name", x),
             key="config_search_brain",
-            help="进行联网学术搜索时使用的模型。仅支持百炼兼容模式的 Responses 联网接口。"
+            help="进行联网学术搜索时使用的模型。支持原生 responses 端点，也支持任何标准 Chat 端口模型 (框架将自动调用 Exa/Firecrawl 搜集全网学术文献切片并注入 Prompt)。"
         )
         
-        from core.detection import model_supports_web_search
+        from core.detection import model_supports_web_search, can_be_used_for_web_search
         search_cfg = api_models.get(selected_search_brain, {})
         if model_supports_web_search(search_cfg):
-            st.markdown("<p style='color: green; font-size: 0.88rem; margin-top: -10px; margin-bottom: 15px;'>🟢 兼容 (支持 responses 终结点并开启联网搜索)</p>", unsafe_allow_html=True)
+            st.markdown("<p style='color: #10B981; font-size: 0.88rem; margin-top: -10px; margin-bottom: 15px;'>🟢 路径 A：原生 Response 联网路径 (使用 API 端点内置工具联网)</p>", unsafe_allow_html=True)
+        elif can_be_used_for_web_search(search_cfg):
+            st.markdown("<p style='color: #3B82F6; font-size: 0.88rem; margin-top: -10px; margin-bottom: 15px;'>🔵 路径 B：通用 Chat 端口 + Exa 显式打捞路径 (模型无原生联网，框架自动调用 Exa/Firecrawl 搜集全网学术文献切片并注入上下文)</p>", unsafe_allow_html=True)
         else:
-            st.markdown("<p style='color: red; font-size: 0.88rem; margin-top: -10px; margin-bottom: 15px;'>🔴 不兼容 (不支持 responses 终结点，请配置百炼兼容模式 Responses API)</p>", unsafe_allow_html=True)
+            st.markdown("<p style='color: #EF4444; font-size: 0.88rem; margin-top: -10px; margin-bottom: 15px;'>🔴 极简配置未就绪 (缺失 API Key 或 Endpoint URL)</p>", unsafe_allow_html=True)
             
         # 4. 24小时雷达简报大脑
         br_config = load_briefing_config()
