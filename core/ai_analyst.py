@@ -6,19 +6,24 @@ import requests
 from .database import save_ai_summary
 from .config_loader import get_model_config, get_global_settings
 
-def _audit_api_call(provider, model_name, api_url="", request_label="llm_request"):
-    """记录同步 LLM 调用次数，供侧边栏日/周/月 API 计数展示。"""
+def _audit_api_call(provider="", model_name="", api_url="", request_label="llm_request"):
+    """记录同步 LLM / API 调用次数，供侧边栏日/周/月 API 计数展示。"""
     try:
         from .database import get_db_connection
         provider_norm = (provider or "").lower()
         model_norm = (model_name or "").lower()
         url_norm = (api_url or "").lower()
-        if provider_norm == "gemini":
+        
+        if provider_norm == "gemini" or "gemini" in model_norm or "generativelanguage" in url_norm:
             api_provider = "google"
-        elif "dashscope" in url_norm or "qwen" in model_norm:
+        elif "dashscope" in url_norm or "qwen" in model_norm or "dashscope" in provider_norm or "aliyun" in url_norm:
             api_provider = "dashscope"
-        elif "deepseek" in url_norm or "deepseek" in model_norm or provider_norm == "deepseek":
+        elif "deepseek" in url_norm or "deepseek" in model_norm or "deepseek" in provider_norm:
             api_provider = "deepseek"
+        elif "exa" in url_norm or "exa" in provider_norm:
+            api_provider = "exa"
+        elif "firecrawl" in url_norm or "firecrawl" in provider_norm:
+            api_provider = "firecrawl"
         else:
             api_provider = "deepseek"
 
@@ -72,6 +77,8 @@ def make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, ma
                 payload[k] = v
             
     response = requests.post(api_url, headers=headers, json=payload, timeout=timeout)
+    if response.status_code == 200:
+        _audit_api_call(provider="", model_name=model_name, api_url=api_url, request_label="make_llm_request")
     return response
 
 def parse_llm_response(response, is_responses_api):

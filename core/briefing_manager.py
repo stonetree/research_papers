@@ -110,6 +110,10 @@ def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
                 print(f"[{datetime.datetime.now()}] [重试提示] 正在重试调用 Gemini API (第 {attempt+1}/{max_retries} 次尝试)...")
             response = requests.post(url, json=payload, headers=headers, proxies=proxies, timeout=180)
             response.raise_for_status()
+            
+            from .ai_analyst import _audit_api_call
+            _audit_api_call(provider="gemini", model_name=model_name, api_url=url, request_label="generate_briefing_report")
+            
             json_data = response.json()
             
             candidate = json_data['candidates'][0]
