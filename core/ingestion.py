@@ -105,6 +105,11 @@ class IngestionCoordinator:
 
         # 阶段 3: SQLite 终审阶段。将大仓 chunks 内容、FTS5 物化搜索表、全文表打包提交 WriteWorker 原子写入
         commit_sql_pipeline = []
+        
+        # 清理旧切片与索引以保障幂等写
+        commit_sql_pipeline.append(("DELETE FROM chunks WHERE doc_id = ?", (doc_id,)))
+        commit_sql_pipeline.append(("DELETE FROM search_chunks WHERE doc_id = ?", (doc_id,)))
+        
         for idx, chunk in enumerate(chunks_payload):
             chunk_id = f"chunk_{doc_id}_{idx}"
             commit_sql_pipeline.append((
@@ -118,9 +123,9 @@ class IngestionCoordinator:
                 (doc_id, chunk_id, preprocessed_title, chunk.get('section_path'), preprocessed_body)
             ))
         
-        # 写入全文表
+        # 写入全文表 (使用 INSERT OR REPLACE 避免主键冲突)
         commit_sql_pipeline.append((
-            "INSERT INTO document_contents (doc_id, full_text_markdown, ai_summary, structured_takeaways_json, evidence_json) VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO document_contents (doc_id, full_text_markdown, ai_summary, structured_takeaways_json, evidence_json) VALUES (?, ?, ?, ?, ?)",
             (doc_id, doc_payload['full_text_markdown'], doc_payload['ai_summary'], doc_payload['structured_takeaways_json'], doc_payload['evidence_json'])
         ))
         
