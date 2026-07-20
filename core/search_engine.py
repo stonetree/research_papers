@@ -174,31 +174,57 @@ async def api_retrieve(query: str, filter_type: Any, top_k_raw: int = 50) -> Dic
 
 async def api_rerank(query: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    原子重排层接口：输入 candidates，调用本地 Reranker 微服务。
+    原子重排层接口：输入 candidates，调用本地 8082 Reranker 微服务。
+    当 8082 服务离线或不在线时，给出警告提示并平滑跳过重排步骤，直接透传 RRF 排序顺序。
     """
     if not candidates:
-        return {"results": []}
+        return {"results": [], "skipped_rerank": False}
         
     compute_client = LocalComputeKernelClient()
-    # 限制 Query 长度不超过 200 字符，并融合标题与章节作为重排特征以提升元数据检索精度。整体截断限制在 600 字符以内防止超出 512 batch size (tokens) 物理红线
+    is_rerank_ready = await compute_client.check_rerank_service_health()
+    
+    if not is_rerank_ready:
+        logger.warning("⚠️ [Rerank 8082 离线] 本地 Reranker 服务未在 8082 端口响应，自动跳过 Logits 重排步骤，直接保持 RRF 混合融合顺序输出。")
+        formatted_results = []
+        for rank_idx, cand in enumerate(candidates):
+            cand_copy = cand.copy()
+            cand_copy["rerank_score"] = cand.get("hybrid_score", 0.0)
+            formatted_results.append({
+                "id": cand["chunk_id"],
+                "relevance_score": cand.get("hybrid_score", 0.0),
+                "rank_index": rank_idx,
+                "evidence": cand_copy
+            })
+        return {"results": formatted_results, "skipped_rerank": True}
+
+    # 限制 Query 长度不超过 200 字符，整体截断限制在 600 字符以内防止超出 512 batch size
     safe_query = query[:200]
     texts = [f"标题: {c['title']} | 章节: {c['section_path']} | 正文: {c['text']}"[:600] for c in candidates]
     
-    # 物理调用 reranker score
     scores = await compute_client.get_rerank_scores(safe_query, texts)
-    
+    if not scores:
+        logger.warning("⚠️ [Rerank 计算空回退] Reranker 未返回得分序列，自动跳过 Logits 重排步骤，透传 RRF 结果。")
+        formatted_results = []
+        for rank_idx, cand in enumerate(candidates):
+            cand_copy = cand.copy()
+            cand_copy["rerank_score"] = cand.get("hybrid_score", 0.0)
+            formatted_results.append({
+                "id": cand["chunk_id"],
+                "relevance_score": cand.get("hybrid_score", 0.0),
+                "rank_index": rank_idx,
+                "evidence": cand_copy
+            })
+        return {"results": formatted_results, "skipped_rerank": True}
+
     results = []
     for idx, cand in enumerate(candidates):
         score = scores[idx] if idx < len(scores) else 0.0
-        # 追加 rerank_score 属性
         cand_copy = cand.copy()
         cand_copy["rerank_score"] = score
         results.append(cand_copy)
         
-    # 按重排分数降序重排
     results.sort(key=lambda x: x["rerank_score"], reverse=True)
     
-    # 返回排名结果
     formatted_results = []
     for rank_idx, r in enumerate(results):
         formatted_results.append({
@@ -207,7 +233,7 @@ async def api_rerank(query: str, candidates: List[Dict[str, Any]]) -> Dict[str, 
             "rank_index": rank_idx,
             "evidence": r
         })
-    return {"results": formatted_results}
+    return {"results": formatted_results, "skipped_rerank": False}
 
 @api_billing_audit(api_provider="dashscope", api_metric="tokens")
 async def api_answer(

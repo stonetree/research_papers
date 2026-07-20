@@ -41,6 +41,23 @@ class LocalComputeKernelClient:
         """类静态同步版本的 8081 Embedding 服务心跳健康探测"""
         return check_embedding_service_health_sync()
 
+    async def check_rerank_service_health(self) -> bool:
+        """
+        心跳检测：检查本地 8082 端口 Rerank 服务是否处于 Ready 就绪状态
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {"query": "healthcheck", "documents": ["ping"], "model": "qwen3-reranker"}
+                async with session.post(self.rerank_url, json=payload, timeout=2) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
+
+    @staticmethod
+    def check_rerank_service_health_sync() -> bool:
+        """类静态同步版本的 8082 Rerank 服务心跳健康探测"""
+        return check_rerank_service_health_sync()
+
     async def get_embedding(self, text: str) -> Optional[List[float]]:
         """
         向本地 8081 端口获取高维稠密特征向量
@@ -108,12 +125,12 @@ class LocalComputeKernelClient:
                                         if 0 <= idx < len(documents):
                                             scores[idx] = float(score)
                                     return scores
-                            logger.error(f"本地 Reranker 内核响应错误。HTTP: {resp.status}")
+                            logger.warning(f"⚠️ 本地 Reranker (127.0.0.1:8082) 内核响应异常。HTTP: {resp.status}")
                 except asyncio.TimeoutError:
-                    logger.error("🚨 本地 Reranker 内核排队响应超时，自动实施平滑降级，各候选切片重排分数兜底置零！")
+                    logger.warning("⚠️ 本地 Reranker 内核排队响应超时，自动跳过此重排步骤。")
                 except Exception as e:
-                    logger.error(f"🚨 本地 Reranker 内核连接异常: {str(e)}")
-                return [0.0] * len(documents)
+                    logger.warning(f"⚠️ 本地 Reranker 内核 (127.0.0.1:8082) 离线或未启动 ({e})，将跳过 Logits 重排直接按 RRF 权重顺序输出。")
+                return None
 
 
 class ExaApiClient:
@@ -230,6 +247,29 @@ def check_embedding_service_health_sync() -> bool:
 
     async def _run():
         return await client.check_embedding_service_health()
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, _run())
+            return future.result()
+    else:
+        return asyncio.run(_run())
+
+
+def check_rerank_service_health_sync() -> bool:
+    """同步版本的 8082 Rerank 服务心跳健康探测"""
+    import asyncio
+    import concurrent.futures
+
+    client = LocalComputeKernelClient()
+
+    async def _run():
+        return await client.check_rerank_service_health()
 
     try:
         loop = asyncio.get_running_loop()

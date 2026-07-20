@@ -254,16 +254,21 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("🔌 系统诊断与状态")
 
 try:
-    from core.api_clients import check_embedding_service_health_sync
+    from core.api_clients import check_embedding_service_health_sync, check_rerank_service_health_sync
 except ImportError:
     from core.api_clients import LocalComputeKernelClient
     check_embedding_service_health_sync = LocalComputeKernelClient.check_service_health_sync
+    check_rerank_service_health_sync = LocalComputeKernelClient.check_rerank_service_health_sync
 
 from core.ingestion import get_pending_vectorization_documents, batch_process_pending_vectorization_sync
 
 is_embed_ready = check_embedding_service_health_sync()
+is_rerank_ready = check_rerank_service_health_sync()
+
 pending_vec_docs = get_pending_vectorization_documents()
 pending_vec_count = len(pending_vec_docs)
+
+st.sidebar.caption(f"🎯 Rerank 引擎 (8082): {'🟢 就绪 (Ready)' if is_rerank_ready else '🟡 离线/未启动 (已自动跳过)'}")
 
 if is_embed_ready:
     st.sidebar.caption("🧬 Embedding 引擎 (8081): 🟢 就绪 (Ready)")
