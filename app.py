@@ -26,22 +26,38 @@ import streamlit as st
 import os
 import json
 import threading
-from core.database import init_db, get_db_connection, resolve_pdf_path, insert_search_archive, get_search_archives, delete_search_archive, delete_paper_metadata
+from core.database import init_db, get_db_connection, resolve_pdf_path, insert_search_archive, get_search_archives, delete_search_archive, delete_paper_metadata, get_suspended_tasks, delete_suspended_task, get_paper_deconstruction_status
+from core.suspended_task_manager import resume_suspended_search_task_sync
 from core.engine_semantic import execute_semantic_search
 from core.engine_arxiv import execute_arxiv_search
-from core.ai_analyst import analyze_and_store_paper, test_api_connection, model_web_search
+from core.ai_analyst import analyze_and_store_paper, test_api_connection, model_web_search, evaluate_candidates_relevance_batch
 from core.downloader import download_and_import_paper
 from core.detection import get_search_capable_models, model_supports_web_search
 from core.config_loader import load_api_config, get_default_model, set_default_model, get_global_settings, update_global_settings, update_model_config, delete_model_config
 from core.library_scanner import sync_local_library, get_unanalyzed_papers
 from core.scheduler import start_scheduler, add_scheduler_task, delete_scheduler_task, get_active_tasks
 from core.funnel_search import execute_two_stage_funnel_search
+from core.search_engine import execute_two_stage_online_academic_search
 from config.research_topics import TOPIC_REGISTRY
 from core.env_helper import get_env_var
 
-init_db()
+if "db_initialized" not in st.session_state:
+    init_db()
+    st.session_state["db_initialized"] = True
+
 api_models = load_api_config()
 start_scheduler()
+
+@st.cache_data(ttl=15)
+def get_cached_service_health():
+    """轻量级高频缓存健康探测结果，避免每次用户交互时发生阻塞式网络等待"""
+    try:
+        from core.api_clients import check_embedding_service_health_sync, check_rerank_service_health_sync
+    except ImportError:
+        from core.api_clients import LocalComputeKernelClient
+        check_embedding_service_health_sync = LocalComputeKernelClient.check_service_health_sync
+        check_rerank_service_health_sync = LocalComputeKernelClient.check_rerank_service_health_sync
+    return check_embedding_service_health_sync(), check_rerank_service_health_sync()
 
 def format_utc_to_local(utc_str):
     if not utc_str:
@@ -253,17 +269,9 @@ st.sidebar.markdown("---")
 # 🔌 系统诊断与状态
 st.sidebar.subheader("🔌 系统诊断与状态")
 
-try:
-    from core.api_clients import check_embedding_service_health_sync, check_rerank_service_health_sync
-except ImportError:
-    from core.api_clients import LocalComputeKernelClient
-    check_embedding_service_health_sync = LocalComputeKernelClient.check_service_health_sync
-    check_rerank_service_health_sync = LocalComputeKernelClient.check_rerank_service_health_sync
-
 from core.ingestion import get_pending_vectorization_documents, batch_process_pending_vectorization_sync
 
-is_embed_ready = check_embedding_service_health_sync()
-is_rerank_ready = check_rerank_service_health_sync()
+is_embed_ready, is_rerank_ready = get_cached_service_health()
 
 pending_vec_docs = get_pending_vectorization_documents()
 pending_vec_count = len(pending_vec_docs)
@@ -285,33 +293,49 @@ else:
     if pending_vec_count > 0:
         st.sidebar.warning(f"⚠️ **Embedding 未就绪** | 待处理积压: `{pending_vec_count}` 篇 (已被安全挂起存储)")
 
-# 读取开机默认大脑设置并匹配选项索引
+# 读取全局大脑配置（与「全局系统配置」完全联动，侧边栏保持只读状态显示）
 default_model_id = get_default_model()
 model_keys = list(api_models.keys())
 global_settings_sidebar = get_global_settings()
-detailed_analysis_model_id = global_settings_sidebar.get("detailed_analysis_model_id", default_model_id)
-abstract_relevance_model_id = global_settings_sidebar.get("abstract_relevance_model_id", default_model_id)
-default_index = model_keys.index(detailed_analysis_model_id) if detailed_analysis_model_id in model_keys else (model_keys.index(default_model_id) if default_model_id in model_keys else 0)
 
-selected_brain_key = st.sidebar.selectbox(
-    "论文精细化分析大脑",
-    options=model_keys,
-    index=default_index,
-    format_func=lambda x: api_models[x].get("name", x),
-    key="active_reading_brain_sidebar"
-)
-selected_analysis_model_id = selected_brain_key
-selected_relevance_model_id = abstract_relevance_model_id if abstract_relevance_model_id in model_keys else selected_analysis_model_id
-selected_online_search_model_id = global_settings_sidebar.get("search_model_id", selected_analysis_model_id)
-if selected_online_search_model_id not in model_keys:
-    selected_online_search_model_id = selected_analysis_model_id
+detailed_analysis_model_id = global_settings_sidebar.get("detailed_analysis_model_id", default_model_id)
+if detailed_analysis_model_id not in model_keys and model_keys:
+    detailed_analysis_model_id = default_model_id if default_model_id in model_keys else model_keys[0]
+
+abstract_relevance_model_id = global_settings_sidebar.get("abstract_relevance_model_id", default_model_id)
+if abstract_relevance_model_id not in model_keys and model_keys:
+    abstract_relevance_model_id = detailed_analysis_model_id
+
+search_model_id = global_settings_sidebar.get("search_model_id", default_model_id)
+if search_model_id not in model_keys and model_keys:
+    search_model_id = detailed_analysis_model_id
+
+selected_analysis_model_id = detailed_analysis_model_id
+selected_relevance_model_id = abstract_relevance_model_id
+selected_online_search_model_id = search_model_id
+
+analysis_name = api_models.get(selected_analysis_model_id, {}).get("name", selected_analysis_model_id or "未配置")
+relevance_name = api_models.get(selected_relevance_model_id, {}).get("name", selected_relevance_model_id or "未配置")
+search_name = api_models.get(selected_online_search_model_id, {}).get("name", selected_online_search_model_id or "未配置")
+
+try:
+    from core.briefing_manager import load_briefing_config
+    br_config = load_briefing_config()
+    br_model = br_config.get("model_name", "")
+    briefing_name = br_model
+    for k in model_keys:
+        if api_models[k].get("model") == br_model or k == br_model:
+            briefing_name = api_models[k].get("name", k)
+            break
+except Exception:
+    briefing_name = "未配置"
 
 # 守护调度线程状态
 is_scheduler_running = any(t.name == "RadarSchedulerDaemon" for t in threading.enumerate())
 scheduler_status_html = (
-    "<span style='color: green; font-weight: bold;'>🟢 运行中</span>" 
+    "<span style='color: #10B981; font-weight: 600;'>🟢 运行中</span>" 
     if is_scheduler_running 
-    else "<span style='color: red; font-weight: bold;'>🔴 未启动</span>"
+    else "<span style='color: #EF4444; font-weight: 600;'>🔴 未启动</span>"
 )
 
 # 物理大仓目录状态
@@ -319,14 +343,21 @@ from core.library_scanner import LIBRARY_DIR
 folder_exists = os.path.exists(LIBRARY_DIR)
 folder_writable = os.access(LIBRARY_DIR, os.W_OK) if folder_exists else False
 if folder_exists and folder_writable:
-    folder_status_html = "<span style='color: green; font-weight: bold;'>🟢 正常</span>"
+    folder_status_html = "<span style='color: #10B981; font-weight: 600;'>🟢 正常</span>"
 else:
-    folder_status_html = "<span style='color: red; font-weight: bold;'>🔴 异常</span>"
+    folder_status_html = "<span style='color: #EF4444; font-weight: 600;'>🔴 异常</span>"
 
 st.sidebar.markdown(f"""
-<div style='font-size: 0.95rem; line-height: 1.8; color: #1F2937;'>
+<div style='font-size: 0.9rem; line-height: 1.7; color: #1F2937; margin-top: 4px;'>
     ⏳ <b>守护调度状态</b>: {scheduler_status_html}<br>
     📂 <b>物理大仓状态</b>: {folder_status_html}
+</div>
+<div style='background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 10px 12px; margin: 10px 0 6px 0; font-size: 0.82rem; line-height: 1.6; color: #334155;'>
+    <div style='font-weight: 600; color: #0F172A; margin-bottom: 6px;'>🧠 当前配置 LLM 模型</div>
+    <div style='margin-bottom: 3px;'>• <b>精细分析</b>: <code>{analysis_name}</code></div>
+    <div style='margin-bottom: 3px;'>• <b>摘要相关</b>: <code>{relevance_name}</code></div>
+    <div style='margin-bottom: 3px;'>• <b>联网探测</b>: <code>{search_name}</code></div>
+    <div>• <b>雷达简报</b>: <code>{briefing_name}</code></div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -789,9 +820,12 @@ with tab_model_search:
     if "model_search_query_used" not in st.session_state:
         st.session_state["model_search_query_used"] = ""
 
-    # 配置区
+    relevance_name = api_models.get(selected_relevance_model_id, {}).get("name", selected_relevance_model_id)
+    analysis_name = api_models.get(selected_analysis_model_id, {}).get("name", selected_analysis_model_id)
+    search_name = api_models.get(selected_online_search_model_id, {}).get("name", selected_online_search_model_id)
+
     with st.container(border=True):
-        col_query_in, col_filter, col_web, col_penetrate = st.columns([2.2, 1.1, 1.2, 1.2])
+        col_query_in, col_filter, col_direct, col_web, col_penetrate = st.columns([2.0, 1.0, 1.1, 1.0, 1.1])
         with col_query_in:
             model_query = st.text_input(
                 "输入您关心的技术关键词/提问 Query", 
@@ -811,17 +845,24 @@ with tab_model_search:
                 index=0,
                 key="model_search_filter_selector"
             )
+        with col_direct:
+            direct_model_search = st.checkbox(
+                "🤖 启动AI模型直搜",
+                value=False,
+                help=f"直接将关键词发送给配置的【AI 联网学术探测大脑】({search_name}) 进行全网检索与推荐（最初的业务流）"
+            )
         with col_web:
             allow_web_search = st.checkbox(
                 "🌐 允许联网打捞",
                 value=True,
+                disabled=direct_model_search,
                 help="关闭后仅使用本地知识大仓进行检索与解答，绝对不消耗任何联网抓取与外部 API 配额"
             )
         with col_penetrate:
             force_penetrate = st.checkbox(
                 "🔥 强制穿透外部打捞",
                 value=False,
-                disabled=not allow_web_search,
+                disabled=not allow_web_search or direct_model_search,
                 help="即使本地大仓存在高置信度匹配，依然强制发起 Exa 外部联网打捞（需要开启允许联网打捞）"
             )
 
@@ -831,64 +872,175 @@ with tab_model_search:
         if not model_query.strip():
             st.warning("⚠️ 请输入有效的提问 Query。")
         else:
-              with st.status("🚀 正在启动双路混合检索与 Pipeline B 打捞合成流水线...", expanded=True) as status:
-                  import asyncio
-                  from core.search_engine import execute_unified_studio_search_flow
-                  
-                  def update_progress(text):
-                      status.write(text)
-                      status.update(label=text)
-                  
-                  try:
-                      res = asyncio.run(execute_unified_studio_search_flow(
-                          query=model_query.strip(),
-                          filter_type=target_filter,
-                          force_penetrate=force_penetrate,
-                          allow_web_search=allow_web_search,
-                          model_id=selected_online_search_model_id,
-                          on_progress=update_progress
-                      ))
-                      
-                      if res.get("status") == "success":
-                          st.session_state["model_search_results_v2"] = {
-                              "answer": res.get("answer", ""),
-                              "evidences": res.get("evidences", []),
-                              "routing_path": res.get("routing_path", ""),
-                              "query": model_query.strip(),
-                              "model_id": selected_online_search_model_id
-                          }
-                          st.session_state["model_search_query_used"] = model_query.strip()
-                          status.write("🟢 AI 大脑对账与解答合成完毕！")
-                          status.update(label="🟢 联网学术探测及问答合成成功！", state="complete", expanded=False)
-                          st.toast("🟢 联网学术探测及问答合成成功！")
-                          st.rerun()
-                      else:
-                          status.write(f"🔴 探测失败: {res.get('error', '未知错误')}")
-                          status.update(label=f"🔴 探测失败: {res.get('error', '未知错误')}", state="error", expanded=True)
-                  except Exception as e:
-                      status.write(f"❌ 运行探测流发生异常: {e}")
-                      status.update(label=f"❌ 运行探测流发生异常: {e}", state="error", expanded=True)
+            q_clean = model_query.strip()
+            
+            # 分流 A: 启动AI模型直搜 (最初业务流，直接调用 AI 联网学术探测大脑)
+            if direct_model_search:
+                with st.status(f"🤖 正在启动 AI 模型直搜，直接调用【AI 联网学术探测大脑】({search_name}) 进行全网文献检索...", expanded=True) as status:
+                    def update_direct_p(text):
+                        status.write(text)
+                        status.update(label=text)
+                    try:
+                        update_direct_p("🧠 正在向大模型发送检索 Prompt 并提取推荐论文集...")
+                        success, res_list = model_web_search(q_clean, model_id=selected_online_search_model_id)
+                        if success and isinstance(res_list, list):
+                            st.session_state["model_search_results_v2"] = res_list
+                            st.session_state["model_search_query_used"] = q_clean
+                            status.write(f"🟢 成功检索到 {len(res_list)} 篇前沿学术文献！")
+                            status.update(label="🟢 AI 模型直搜成功！", state="complete", expanded=False)
+                            st.toast("🟢 AI 模型直搜成功！")
+                            st.rerun()
+                        else:
+                            status.write(f"🔴 AI 直搜失败: {res_list}")
+                            status.update(label=f"🔴 AI 直搜失败: {res_list}", state="error", expanded=True)
+                            st.error(f"❌ AI 模型直搜失败: {res_list}")
+                    except Exception as e:
+                        status.write(f"❌ 运行直搜发生异常: {e}")
+                        status.update(label=f"❌ 运行直搜发生异常: {e}", state="error", expanded=True)
+            else:
+                # 分流 B: 两阶段抓取流水线 (Stage 1 Exa 摘要打捞 -> Stage 2 论文摘要相关性分析大脑 初审评价 -> 列表呈现与单篇精细化解构)
+                with st.status(f"🚀 正在启动两阶段学术探测流水线 (Exa 打捞 ➔ 【{relevance_name}】摘要初评)...", expanded=True) as status:
+                    import asyncio
+                    def update_progress(text):
+                        status.write(text)
+                        status.update(label=text)
+                    try:
+                        res = asyncio.run(execute_two_stage_online_academic_search(
+                            query=q_clean,
+                            filter_type=target_filter,
+                            relevance_model_id=selected_relevance_model_id,
+                            target_limit=8,
+                            on_progress=update_progress
+                        ))
+                        if res.get("status") == "success":
+                            st.session_state["model_search_results_v2"] = res.get("results", [])
+                            st.session_state["model_search_query_used"] = q_clean
+                            status.write(f"🟢 成功打捞并完成 {len(res.get('results', []))} 篇文献摘要初评！")
+                            status.update(label="🟢 两阶段学术探测与摘要相关性初评成功！", state="complete", expanded=False)
+                            st.toast("🟢 两阶段学术探测成功！请查看下方文献列表。")
+                            st.rerun()
+                        else:
+                            status.write(f"🔴 探测失败: {res.get('error', '未知错误')}")
+                            status.update(label=f"🔴 探测失败: {res.get('error', '未知错误')}", state="error", expanded=True)
+                            st.error(f"❌ 探测失败: {res.get('error')}")
+                    except Exception as e:
+                        status.write(f"❌ 运行探测流发生异常: {e}")
+                        status.update(label=f"❌ 运行探测流发生异常: {e}", state="error", expanded=True)
 
+    # ⏸️ 挂起与待恢复任务列表
+    suspended_tasks = get_suspended_tasks(status="suspended")
+    if suspended_tasks:
+        st.markdown("---")
+        st.markdown(f"### ⏸️ 挂起与待恢复任务列表 (`{len(suspended_tasks)}` 个中断任务)")
+        st.caption("以下为执行过程中遭遇大模型 503 等瞬态故障而安全挂起的任务。已抓取的学术文献与证据切片均已完整留存，您可以点击【⚡ 立即重试】无缝继续执行。")
+
+        for task in suspended_tasks:
+            task_id = task["task_id"]
+            with st.container(border=True):
+                col_t_info, col_t_actions = st.columns([3.4, 1.4])
+                
+                with col_t_info:
+                    st.markdown(f"##### 🔍 主题: `{task['query']}`")
+                    f_name = "📚 学术论文" if task.get("filter_type") == "arxiv_paper" else "🌐 技术博客/网页"
+                    m_name = api_models.get(task.get("model_id"), {}).get("name", task.get("model_id", "未知"))
+                    st.caption(f"🆔 `{task_id}` | 🏷️ {f_name} | 🧠 {m_name} | 🕒 {task.get('created_at', '')}")
+                
+                with col_t_actions:
+                    col_b_res, col_b_del = st.columns([1.2, 0.8])
+                    with col_b_res:
+                        retry_clicked = st.button("⚡ 立即重试", key=f"resume_task_btn_{task_id}", type="primary", use_container_width=True)
+                    with col_b_del:
+                        if st.button("🗑️ 放弃", key=f"delete_task_btn_{task_id}", use_container_width=True):
+                            delete_suspended_task(task_id)
+                            st.toast(f"🗑️ 已成功放弃并删除任务 [{task_id}]")
+                            st.rerun()
+
+                # 下拉展开概括信息文本框 (0ms 纯前端原生展开)
+                with st.expander("📋 查看任务概括与已沉淀切片 (点击展开/收回)", expanded=False):
+                    import json
+                    try:
+                        inter_data = json.loads(task.get("intermediate_data_json", "{}"))
+                    except Exception:
+                        inter_data = {}
+                    ev_count = len(inter_data.get("evidences", []))
+                    scraped_count = len(inter_data.get("scraped_urls", []))
+                    err_msg_text = task.get("error_message", "未知错误")
+
+                    st.markdown(f"""
+                    <div style='background-color: #FEF2F2; border: 1px solid #FECACA; border-radius: 8px; padding: 14px 16px; margin-top: 8px; font-size: 0.9rem; line-height: 1.7; color: #991B1B;'>
+                        <div style='font-size: 1rem; font-weight: 700; color: #7F1D1D; margin-bottom: 8px; border-bottom: 1px solid #FCA5A5; padding-bottom: 6px; display: flex; align-items: center;'>
+                            <span>⏸️ 挂起任务现场概括</span>
+                            <span style='margin-left: auto; color: #DC2626; font-size: 0.85rem; font-weight: 600;'>🚨 阻塞节点: {task.get('error_step', '未知步骤')}</span>
+                        </div>
+                        <table style='width: 100%; border-collapse: collapse; font-size: 0.88rem;'>
+                            <tr>
+                                <td style='width: 50%; padding: 4px 0;'><b>🔍 检索主题</b>: <code>{task['query']}</code></td>
+                                <td style='width: 50%; padding: 4px 0;'><b>🧭 数据类型</b>: {f_name}</td>
+                            </tr>
+                            <tr>
+                                <td style='width: 50%; padding: 4px 0;'><b>🧠 计划解答大脑</b>: {m_name}</td>
+                                <td style='width: 50%; padding: 4px 0;'><b>🕒 挂起时间</b>: {task.get('created_at', '')}</td>
+                            </tr>
+                            <tr>
+                                <td style='width: 50%; padding: 4px 0;'><b>📦 已抓取文献/网页</b>: <code>{scraped_count}</code> 篇/页</td>
+                                <td style='width: 50%; padding: 4px 0;'><b>📊 已提取证据切片</b>: <code>{ev_count}</code> 条</td>
+                            </tr>
+                        </table>
+                        <div style='margin-top: 8px; padding-top: 6px; border-top: 1px dashed #FCA5A5; color: #B91C1C; font-size: 0.85rem;'>
+                            <b>🔴 崩溃异常信息</b>: <code>{err_msg_text}</code>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                if retry_clicked:
+                    status_placeholder = st.empty()
+                    with status_placeholder.status(f"⚡ 正在恢复任务 [{task_id}]...", expanded=True) as retry_status:
+                        def update_retry_progress(text):
+                            retry_status.write(text)
+                            retry_status.update(label=text)
+                        
+                        success, res = resume_suspended_search_task_sync(task_id, on_progress=update_retry_progress)
+                        if success:
+                            st.session_state["model_search_results_v2"] = {
+                                "answer": res.get("answer", ""),
+                                "evidences": res.get("evidences", []),
+                                "routing_path": res.get("routing_path", ""),
+                                "query": res.get("query", task["query"]),
+                                "model_id": res.get("model_id", task.get("model_id"))
+                            }
+                            st.session_state["model_search_query_used"] = res.get("query", task["query"])
+                            retry_status.write("🟢 任务断点恢复成功，已成功生成解答！")
+                            retry_status.update(label=f"🟢 任务 [{task_id}] 恢复并执行成功！", state="complete", expanded=False)
+                            st.toast(f"🟢 挂起任务 [{task_id}] 已成功恢复完成！")
+                            st.rerun()
+                        else:
+                            err_msg = res.get("error", "未知错误")
+                            retry_status.write(f"🔴 恢复重试失败: {err_msg}")
+                            retry_status.update(label=f"🔴 恢复重试失败: {err_msg}", state="error", expanded=True)
+                            st.error(f"❌ 恢复执行失败: {err_msg}")
 
     # 显示结果
     search_res = st.session_state.get("model_search_results_v2")
     if search_res is not None:
         st.markdown("---")
         
-        # 1. 判定返回的是 V2 格式 (dict) 还是 V1 格式 (list)
-        if isinstance(search_res, dict):
-            # V2 格式：单栏渲染问答与文献
-            st.markdown(f"##### 🧠 AI 大脑辩证答复 — `{search_res['query']}`")
+        current_loaded_query = st.session_state.get("model_search_query_used", "")
+        if current_loaded_query:
+            st.info(f"📂 **当前呈现检索/归档结果**：`{current_loaded_query}`")
+
+        # 1. 判定返回的是 V2 统一问答格式 (dict 含 answer)
+        if isinstance(search_res, dict) and "answer" in search_res:
+            st.markdown(f"##### 🧠 AI 大脑辩证答复 — `{search_res.get('query', current_loaded_query)}`")
             
             # 展现路由路径诊断
             path = search_res.get("routing_path", "")
             if path == "local_cache_hit":
                 st.success("🎯 **检索路径诊断**：本地大仓高置信度精确命中！执行 0 成本本地解答合成。")
             elif path == "local_only":
-                st.info("🔒 **检索路径诊断**：联网检索已被选项关闭，限定仅使用本地大仓（FTS5 + LanceDB 向量）进行检索与解答合成。")
+                st.info("🔒 **检索路径诊断**：已关闭联网打捞与大模型解答合成，直接呈现本地大仓（FTS5 全文 + LanceDB 向量）重排后的高相关文献切片列表。")
             elif path == "exa_penetrate_funnel":
                 st.warning("🔍 **检索路径诊断**：本地大仓未完全覆盖，或者开启了强制穿透。已启动 Exa 神经网络打捞，并将最新成果 2PC 沉淀落库。")
-            else:
+            elif path:
                 st.info(f"ℹ️ **检索路径诊断**：{path}")
             
             # 用 Glassmorphism 样式容器渲染 AI 答复
@@ -922,6 +1074,111 @@ with tab_model_search:
                         st.markdown(f"**[{idx+1}] [{doc_id}]** [{title_str}]({url_str})")
                         st.caption(f"📍 章节/位置: `{ev.get('section_path', 'N/A')}` &nbsp;|&nbsp; 📄 页码: `p.{ev.get('page_number', '1')}` &nbsp;|&nbsp; 📈 得分: `{hybrid_score:.4f}`")
                         st.markdown(f"<div style='font-size: 0.88rem; color: #4B5563; background-color: #F9FAFB; padding: 8px; border-radius: 6px; border-left: 3px solid #6366F1;'>{ev.get('text', '')[:300]}...</div>", unsafe_allow_html=True)
+
+        # 2. 判定返回的是文献列表格式 (List[dict] 结构，包含两阶段评估初评结果或 AI 直搜推荐列表)
+        elif isinstance(search_res, list) and len(search_res) > 0 and isinstance(search_res[0], dict):
+            st.markdown(f"##### 📚 检索学术文献列表 (共 `{len(search_res)}` 篇) — `{current_loaded_query}`")
+            st.caption(f"系统已完成 Exa 全网打捞与【{relevance_name}】摘要初评。点击【🤖 一键深度解构】将调用【{analysis_name}】生成全景报告；已解构文献可直接点击【📖 查看解构报告】。")
+            
+            for idx, p in enumerate(search_res):
+                p_title = p.get("title", "无标题文献")
+                p_url = format_evidence_url(p.get("url", "#"))
+                p_authors = p.get("authors", "未知作者/团队")
+                p_venue = p.get("year_venue") or p.get("venue") or p.get("year", "未知来源")
+                p_abstract = p.get("abstract") or p.get("summary", "")
+                p_score = p.get("score")
+                p_rec = p.get("recommendation")
+                p_critique = p.get("critique")
+                
+                # 检查本地大仓中是否已经完成解构 (支持 ID、标题与 URL/arXiv ID 多维对账)
+                is_deconstructed, existing_pid = get_paper_deconstruction_status(
+                    title=p_title, 
+                    doc_id=p.get("paper_id") or p.get("doc_id"), 
+                    url=p.get("url") or p.get("canonical_url")
+                )
+                
+                with st.container(border=True):
+                    col_p_info, col_p_btn = st.columns([3.2, 1.2])
+                    with col_p_info:
+                        st.markdown(f"**[{idx+1}]** <a href='{p_url}' target='_blank' style='font-size: 1.02rem; font-weight: 600; color: #1D4ED8; text-decoration: none;'>{p_title}</a>", unsafe_allow_html=True)
+                        
+                        # 徽标与元数据栏
+                        meta_items = [f"🏷️ <code>{p_venue}</code>", f"👥 {p_authors}"]
+                        if p_rec:
+                            rec_color = "#15803D" if "强烈" in p_rec else ("#0369A1" if "高度" in p_rec else "#B45309")
+                            rec_bg = "#F0FDF4" if "强烈" in p_rec else ("#F0F9FF" if "高度" in p_rec else "#FFFBEB")
+                            rec_badge = f"<span style='background-color: {rec_bg}; color: {rec_color}; padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 0.8rem;'>⭐ {p_rec} ({p_score}分)</span>"
+                            meta_items.insert(0, rec_badge)
+                        if is_deconstructed:
+                            meta_items.append("<span style='background-color: #E0E7FF; color: #3730A3; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 0.78rem;'>✅ 已解构入库</span>")
+                        else:
+                            meta_items.append("<span style='background-color: #F3F4F6; color: #4B5563; padding: 2px 8px; border-radius: 4px; font-size: 0.78rem;'>⏳ 待解构</span>")
+                            
+                        st.markdown(f"<div style='font-size: 0.83rem; color: #64748B; margin: 4px 0 6px 0;'>{' &nbsp;|&nbsp; '.join(meta_items)}</div>", unsafe_allow_html=True)
+                        
+                        # 摘要初评点评框
+                        if p_critique:
+                            st.markdown(f"""
+                            <div style='background-color: #EFF6FF; border-left: 3px solid #3B82F6; border-radius: 4px; padding: 6px 12px; margin-bottom: 6px; font-size: 0.86rem; color: #1E40AF;'>
+                                💡 <b>摘要相关性初评</b>: {p_critique}
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                        if p_abstract:
+                            st.markdown(f"<div style='font-size: 0.86rem; color: #475569; background-color: #F8FAFC; border: 1px solid #F1F5F9; border-radius: 6px; padding: 8px 12px; line-height: 1.6;'>{p_abstract}</div>", unsafe_allow_html=True)
+                            
+                    with col_p_btn:
+                        st.markdown("<div style='padding-top: 6px;'></div>", unsafe_allow_html=True)
+                        if is_deconstructed:
+                            if st.button("📖 查看解构报告", key=f"btn_view_decomp_{idx}_{existing_pid or idx}", type="primary", use_container_width=True):
+                                st.session_state["active_view_paper_id"] = existing_pid
+                                if "search_keyword" in st.session_state:
+                                    st.session_state["search_keyword"] = ""
+                                st.toast(f"👉 已成功定位 《{p_title[:15]}...》，请切换到【📂 本地沉淀文献大仓】查看全景报告！")
+                                st.rerun()
+                        else:
+                            if st.button("🤖 一键深度解构", key=f"btn_do_decomp_{idx}_{p.get('title', '')[:10]}", type="primary", use_container_width=True):
+                                with st.spinner(f"正在下载并调用【论文精细化分析大脑】({analysis_name}) 进行深度解构..."):
+                                    success, msg, pid = download_and_import_paper(p, selected_analysis_model_id)
+                                    if success:
+                                        st.success(msg)
+                                        if "last_imported_paper_ids" not in st.session_state:
+                                            st.session_state["last_imported_paper_ids"] = []
+                                        if pid and pid not in st.session_state["last_imported_paper_ids"]:
+                                            st.session_state["last_imported_paper_ids"].append(pid)
+                                        st.toast(f"🎉 《{p_title[:15]}...》 已完成 AI 深度解构并成功落盘！")
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                                        
+                    # 如果已经解构，提供就地直接展开阅读 AI 报告正文的 Expander
+                    if is_deconstructed and existing_pid:
+                        with st.expander(f"👁️ 直接在此展开阅读 《{p_title[:20]}...》 AI 深度解构报告"):
+                            conn_d = get_db_connection()
+                            try:
+                                r_sum = conn_d.execute("SELECT dialectical_analysis, model_name FROM ai_summaries WHERE paper_id = ?", (existing_pid,)).fetchone()
+                                if r_sum and r_sum["dialectical_analysis"]:
+                                    st.caption(f"🧠 解构大脑: `{r_sum['model_name']}`")
+                                    st.markdown(r_sum["dialectical_analysis"])
+                                else:
+                                    st.info("⏳ 暂无解构报告内容。")
+                            finally:
+                                conn_d.close()
+
+        # 3. 判定返回的是候选切片格式 (Dict 含 candidates)
+        elif isinstance(search_res, dict) and "candidates" in search_res:
+            candidates = search_res.get("candidates", [])
+            st.markdown(f"##### 🔎 本地知识库命中候选 (共 `{len(candidates)}` 条)")
+            for idx, c in enumerate(candidates):
+                with st.container(border=True):
+                    c_title = c.get("title", "无标题文献")
+                    c_doc = c.get("doc_id", "unknown")
+                    c_score = c.get("hybrid_score", 0.0)
+                    c_text = c.get("text", "")
+                    st.markdown(f"**[{idx+1}] [{c_doc}]** {c_title}")
+                    st.caption(f"📈 综合匹配得分: `{c_score:.4f}`")
+                    if c_text:
+                        st.markdown(f"<div style='font-size: 0.88rem; color: #4B5563; background-color: #F9FAFB; padding: 8px; border-radius: 6px; border-left: 3px solid #10B981;'>{c_text[:300]}...</div>", unsafe_allow_html=True)
 
         # 显示最新生成的 AI 剖析报告入口 (直观查看解析结果)
         if st.session_state.get("last_imported_paper_ids"):
@@ -961,6 +1218,28 @@ with tab_model_search:
                         else:
                             st.warning("⏳ 报告正文正在生成或写入中，请稍后刷新。")
 
+        # 🗄️ 归档本次学术探测结果 / 清除结果控制栏
+        st.markdown("---")
+        col_arc_save, col_clear_save = st.columns([3, 1])
+        with col_arc_save:
+            if st.button("🗄️ 归档本次学术探测结果", width="stretch", type="primary", key="btn_archive_model_search"):
+                import json
+                import uuid
+                archive_id = f"arc_{uuid.uuid4().hex[:8]}"
+                query_to_save = current_loaded_query or (search_res.get("query") if isinstance(search_res, dict) else "学术探测归档")
+                results_json = json.dumps(search_res, ensure_ascii=False)
+                insert_search_archive(archive_id, query_to_save, results_json)
+                st.toast("🎉 本次学术探测结果已成功归档到历史大仓！")
+                st.rerun()
+        with col_clear_save:
+            if st.button("❌ 清除当前结果", width="stretch", key="btn_clear_model_search"):
+                st.session_state["model_search_results_v2"] = None
+                st.session_state["model_search_query_used"] = ""
+                if "last_imported_paper_ids" in st.session_state:
+                    del st.session_state["last_imported_paper_ids"]
+                st.toast("🧹 已清除当前检索结果")
+                st.rerun()
+
     # 历史归档列表
     st.markdown("---")
     st.markdown("### 🗄️ 历史学术检索归档大仓")
@@ -970,39 +1249,323 @@ with tab_model_search:
         st.info("💡 暂无历史检索归档记录。")
     else:
         for arc in archives:
+            arc_id = arc["archive_id"]
             with st.container(border=True):
-                col_arc_info, col_arc_btn1, col_arc_btn2 = st.columns([3, 1, 1])
+                col_arc_info, col_arc_btn_del = st.columns([3.8, 0.8])
                 with col_arc_info:
                     st.markdown(f"**🔍 技术主题**: `{arc['query']}`")
-                    st.caption(f"📅 归档时间: `{arc['archived_at']}` &nbsp;|&nbsp; 🆔 归档编号: `{arc['archive_id']}`")
-                with col_arc_btn1:
-                    if st.button("📂 载入查看", key=f"load_arc_{arc['archive_id']}", width="stretch"):
-                        import json
-                        try:
-                            parsed_res = json.loads(arc["results_json"])
-                            if isinstance(parsed_res, dict) and "candidates" in parsed_res:
-                                st.session_state["local_search_results"] = parsed_res
-                                st.session_state["local_search_query_used"] = arc["query"]
-                                if "model_search_results_v2" in st.session_state:
-                                    del st.session_state["model_search_results_v2"]
-                            elif isinstance(parsed_res, dict) and "answer" in parsed_res:
-                                st.session_state["model_search_results_v2"] = parsed_res
-                                st.session_state["model_search_query_used"] = arc["query"]
-                            else:
-                                st.session_state["model_search_results_v2"] = parsed_res
-                                st.session_state["model_search_query_used"] = arc["query"]
-                            
-                            if "last_imported_paper_ids" in st.session_state:
-                                del st.session_state["last_imported_paper_ids"]
-                            st.toast("🟢 成功载入历史检索归档数据！")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ 载入归档失败: {e}")
-                with col_arc_btn2:
-                    if st.button("🗑️ 移除归档", key=f"del_arc_{arc['archive_id']}", width="stretch"):
-                        delete_search_archive(arc["archive_id"])
+                    st.caption(f"📅 归档时间: `{arc['archived_at']}` &nbsp;|&nbsp; 🆔 编号: `{arc_id}`")
+                
+                with col_arc_btn_del:
+                    if st.button("🗑️ 移除", key=f"del_arc_{arc_id}", use_container_width=True):
+                        delete_search_archive(arc_id)
                         st.toast("🗑️ 归档已成功删除")
                         st.rerun()
+
+                # 下拉展开概括信息文本框 (0ms 纯前端原生展开，突出展示文章标题列表与解构/跳转操作)
+                with st.expander("📋 查看概括信息与文章标题列表 (点击展开/收回)", expanded=False):
+                    import json
+                    try:
+                        parsed_res = json.loads(arc["results_json"])
+                    except Exception:
+                        parsed_res = None
+                    
+                    # 1. 判定是否为 V1 论文列表格式 (List[dict] 结构，包含 title, authors, year_venue, summary, url 等)
+                    if isinstance(parsed_res, list) and len(parsed_res) > 0 and isinstance(parsed_res[0], dict):
+                        papers_count = len(parsed_res)
+                        st.markdown(f"""
+                        <div style='background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px; padding: 14px 16px; margin-top: 10px; font-size: 0.9rem; line-height: 1.7; color: #1E293B;'>
+                            <div style='font-size: 1rem; font-weight: 700; color: #0F172A; margin-bottom: 8px; border-bottom: 1px solid #E2E8F0; padding-bottom: 6px; display: flex; align-items: center;'>
+                                <span>🗄️ 归档文献大仓概括</span>
+                                <span style='margin-left: auto; color: #2563EB; font-size: 0.85rem; font-weight: 600;'>📚 共收录 {papers_count} 篇学术文献</span>
+                            </div>
+                            <table style='width: 100%; border-collapse: collapse; font-size: 0.88rem;'>
+                                <tr>
+                                    <td style='width: 50%; padding: 4px 0;'><b>🔍 检索主题</b>: <code>{arc['query']}</code></td>
+                                    <td style='width: 50%; padding: 4px 0;'><b>📅 归档时间</b>: {arc['archived_at']}</td>
+                                </tr>
+                                <tr>
+                                    <td style='width: 50%; padding: 4px 0;'><b>🆔 归档流水号</b>: <code>{arc_id}</code></td>
+                                    <td style='width: 50%; padding: 4px 0;'><b>🏷️ 数据类型</b>: 论文检索集</td>
+                                </tr>
+                            </table>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        st.markdown(f"<div style='margin-top: 12px; font-weight: 700; font-size: 0.95rem; color: #1E293B;'>📑 归档文章标题列表 ({papers_count} 篇):</div>", unsafe_allow_html=True)
+                        for p_idx, p in enumerate(parsed_res):
+                            p_title = p.get("title") or "无标题论文"
+                            p_url = format_evidence_url(p.get("url") or "#")
+                            p_authors = p.get("authors") or "未知作者"
+                            p_year = p.get("year_venue") or p.get("year") or "未知年份/期刊"
+                            p_summary = p.get("summary") or p.get("abstract") or ""
+                            p_rec = p.get("recommendation")
+                            p_score = p.get("score")
+                            p_critique = p.get("critique")
+                            
+                            is_decomp, existing_pid = get_paper_deconstruction_status(
+                                title=p_title, 
+                                doc_id=p.get("paper_id") or p.get("doc_id"), 
+                                url=p.get("url") or p.get("canonical_url")
+                            )
+
+                            with st.container(border=True):
+                                col_item_info, col_item_action = st.columns([3.2, 1.2])
+                                with col_item_info:
+                                    st.markdown(f"**[{p_idx+1}]** <a href='{p_url}' target='_blank' style='font-size: 0.95rem; font-weight: 600; color: #1D4ED8; text-decoration: none;'>{p_title}</a>", unsafe_allow_html=True)
+                                    
+                                    meta_t = [f"👥 {p_authors}", f"🏷️ <code>{p_year}</code>"]
+                                    if p_rec:
+                                        meta_t.insert(0, f"<span style='background-color:#F0FDF4; color:#15803D; padding:1px 6px; border-radius:4px; font-weight:600; font-size:0.78rem;'>⭐ {p_rec} ({p_score}分)</span>")
+                                    if is_decomp:
+                                        meta_t.append("<span style='background-color: #E0E7FF; color: #3730A3; padding: 1px 6px; border-radius: 4px; font-weight: 600; font-size: 0.75rem;'>✅ 已解构</span>")
+                                    else:
+                                        meta_t.append("<span style='background-color: #F3F4F6; color: #4B5563; padding: 1px 6px; border-radius: 4px; font-size: 0.75rem;'>⏳ 待解构</span>")
+                                    st.markdown(f"<div style='color: #64748B; font-size: 0.8rem; margin: 2px 0 4px 0;'>{' &nbsp;|&nbsp; '.join(meta_t)}</div>", unsafe_allow_html=True)
+                                    
+                                    if p_critique:
+                                        st.markdown(f"<div style='background-color: #EFF6FF; border-left: 3px solid #3B82F6; border-radius: 4px; padding: 4px 10px; margin-bottom: 4px; font-size: 0.82rem; color: #1E40AF;'>💡 <b>初评点评</b>: {p_critique}</div>", unsafe_allow_html=True)
+                                    if p_summary:
+                                        st.markdown(f"<div style='background-color: #F8FAFC; border-radius: 4px; padding: 6px 10px; color: #475569; font-size: 0.82rem;'>📝 <b>摘要概括</b>: {p_summary[:250]}...</div>", unsafe_allow_html=True)
+                                        
+                                with col_item_action:
+                                    st.markdown("<div style='padding-top: 4px;'></div>", unsafe_allow_html=True)
+                                    if is_decomp:
+                                        if st.button("📖 查看解构报告", key=f"arc_view_v1_{arc_id}_{p_idx}", type="primary", use_container_width=True):
+                                            st.session_state["active_view_paper_id"] = existing_pid
+                                            if "search_keyword" in st.session_state:
+                                                st.session_state["search_keyword"] = ""
+                                            st.toast(f"👉 已定位 《{p_title[:15]}...》，请切换到上方【📂 本地沉淀文献大仓】查看报告！")
+                                            st.rerun()
+                                    else:
+                                        if st.button("🤖 一键深度解构", key=f"arc_decomp_v1_{arc_id}_{p_idx}", type="primary", use_container_width=True):
+                                            with st.spinner(f"正在下载并调用【论文精细化分析大脑】({analysis_name}) 解构 《{p_title[:15]}...》..."):
+                                                success, msg, pid = download_and_import_paper(p, selected_analysis_model_id)
+                                                if success:
+                                                    st.success(msg)
+                                                    st.toast(f"🎉 《{p_title[:15]}...》 成功完成 AI 深度解构！")
+                                                    st.rerun()
+                                                else:
+                                                    st.error(msg)
+                                                    
+                                if is_decomp and existing_pid:
+                                    with st.expander(f"👁️ 直接展开阅读 《{p_title[:20]}...》 报告正文"):
+                                        conn_a = get_db_connection()
+                                        try:
+                                            r_sum = conn_a.execute("SELECT dialectical_analysis, model_name FROM ai_summaries WHERE paper_id = ?", (existing_pid,)).fetchone()
+                                            if r_sum and r_sum["dialectical_analysis"]:
+                                                st.caption(f"🧠 解构大脑: `{r_sum['model_name']}`")
+                                                st.markdown(r_sum["dialectical_analysis"])
+                                        finally:
+                                            conn_a.close()
+
+                    # 2. 判定是否为 V2 统一问答与切片证据格式 (Dict 结构，包含 answer, evidences 等)
+                    elif isinstance(parsed_res, dict) and "evidences" in parsed_res:
+                        ans_text = parsed_res.get("answer", "")
+                        ev_list = parsed_res.get("evidences", [])
+                        routing = parsed_res.get("routing_path", "unknown")
+                        m_id = parsed_res.get("model_id", "未知")
+                        m_name = api_models.get(m_id, {}).get("name", m_id)
+
+                        routing_desc = {
+                            "local_cache_hit": "🎯 本地大仓高置信度命中 (0 API 开销)",
+                            "local_only": "🔒 本地大仓纯离线检索 (物理隔绝网络)",
+                            "exa_penetrate_funnel": "🌐 Exa 神经网络全网打捞并 2PC 入库"
+                        }.get(routing, f"ℹ️ {routing}")
+
+                        # 提取并去重文章标题列表
+                        articles_map = {}
+                        for ev in ev_list:
+                            t = ev.get("title") or "未知标题"
+                            doc_id = ev.get("doc_id") or t
+                            if doc_id not in articles_map:
+                                articles_map[doc_id] = {
+                                    "title": t,
+                                    "canonical_url": format_evidence_url(ev.get("canonical_url", "#")),
+                                    "doc_id": ev.get("doc_id", "unknown"),
+                                    "max_score": ev.get("hybrid_score", 0.0),
+                                    "section_path": ev.get("section_path", "N/A"),
+                                    "page_number": ev.get("page_number", "1"),
+                                    "snippet": ev.get("text", "")
+                                }
+                            else:
+                                if ev.get("hybrid_score", 0.0) > articles_map[doc_id]["max_score"]:
+                                    articles_map[doc_id]["max_score"] = ev.get("hybrid_score", 0.0)
+                        
+                        unique_articles = list(articles_map.values())
+
+                        st.markdown(f"""
+                        <div style='background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px; padding: 14px 16px; margin-top: 10px; font-size: 0.9rem; line-height: 1.7; color: #1E293B;'>
+                            <div style='font-size: 1rem; font-weight: 700; color: #0F172A; margin-bottom: 8px; border-bottom: 1px solid #E2E8F0; padding-bottom: 6px; display: flex; align-items: center;'>
+                                <span>🗄️ 归档检索全景概括</span>
+                                <span style='margin-left: auto; color: #2563EB; font-size: 0.85rem; font-weight: 600;'>📚 关联 {len(unique_articles)} 篇文献 · {len(ev_list)} 条切片</span>
+                            </div>
+                            <table style='width: 100%; border-collapse: collapse; font-size: 0.88rem;'>
+                                <tr>
+                                    <td style='width: 50%; padding: 4px 0;'><b>🔍 检索主题</b>: <code>{arc['query']}</code></td>
+                                    <td style='width: 50%; padding: 4px 0;'><b>🧭 命中路由</b>: {routing_desc}</td>
+                                </tr>
+                                <tr>
+                                    <td style='width: 50%; padding: 4px 0;'><b>🧠 解答大脑</b>: {m_name}</td>
+                                    <td style='width: 50%; padding: 4px 0;'><b>📅 归档时间</b>: {arc['archived_at']}</td>
+                                </tr>
+                                <tr>
+                                    <td style='width: 50%; padding: 4px 0;'><b>🆔 归档流水号</b>: <code>{arc_id}</code></td>
+                                    <td style='width: 50%; padding: 4px 0;'><b>📊 证据规模</b>: <code>{len(ev_list)}</code> 条精排切片</td>
+                                </tr>
+                            </table>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        # 优先展示：文章标题列表与跳转/解构按钮
+                        st.markdown(f"<div style='margin-top: 12px; font-weight: 700; font-size: 0.95rem; color: #1E293B;'>📑 归档引用文章标题列表 ({len(unique_articles)} 篇):</div>", unsafe_allow_html=True)
+                        for a_idx, art in enumerate(unique_articles):
+                            a_title = art["title"]
+                            a_doc = art["doc_id"]
+                            a_url = art["canonical_url"]
+                            snippet_text = art["snippet"][:180] + ("..." if len(art["snippet"]) > 180 else "")
+                            
+                            is_decomp, existing_pid = get_paper_deconstruction_status(title=a_title, doc_id=a_doc, url=a_url)
+
+                            with st.container(border=True):
+                                col_art_info, col_art_btn = st.columns([3.2, 1.2])
+                                with col_art_info:
+                                    st.markdown(f"**[{a_idx+1}]** <a href='{a_url}' target='_blank' style='font-size: 0.95rem; font-weight: 600; color: #2563EB; text-decoration: none;'>{a_title}</a>", unsafe_allow_html=True)
+                                    meta_a = [
+                                        f"<span style='background: #E0E7FF; color: #3730A3; padding: 1px 6px; border-radius: 4px; font-size: 0.75rem;'>{a_doc}</span>",
+                                        f"📈 相关得分: {art['max_score']:.4f}",
+                                        f"📍 章节: <code>{art['section_path']}</code> (p.{art['page_number']})"
+                                    ]
+                                    if is_decomp:
+                                        meta_a.append("<span style='background-color: #E0E7FF; color: #3730A3; padding: 1px 6px; border-radius: 4px; font-weight: 600; font-size: 0.75rem;'>✅ 已解构</span>")
+                                    else:
+                                        meta_a.append("<span style='background-color: #F3F4F6; color: #4B5563; padding: 1px 6px; border-radius: 4px; font-size: 0.75rem;'>⏳ 待解构</span>")
+                                    st.markdown(f"<div style='color: #64748B; font-size: 0.8rem; margin: 2px 0 4px 0;'>{' &nbsp;|&nbsp; '.join(meta_a)}</div>", unsafe_allow_html=True)
+                                    
+                                    if snippet_text:
+                                        st.markdown(f"<div style='background-color: #F8FAFC; border-radius: 4px; padding: 6px 10px; color: #475569; font-size: 0.82rem;'>📝 <b>核心切片证据</b>: {snippet_text}</div>", unsafe_allow_html=True)
+                                        
+                                with col_art_btn:
+                                    st.markdown("<div style='padding-top: 4px;'></div>", unsafe_allow_html=True)
+                                    if is_decomp:
+                                        if st.button("📖 查看解构报告", key=f"arc_view_v2_{arc_id}_{a_idx}", type="primary", use_container_width=True):
+                                            st.session_state["active_view_paper_id"] = existing_pid
+                                            if "search_keyword" in st.session_state:
+                                                st.session_state["search_keyword"] = ""
+                                            st.toast(f"👉 已定位 《{a_title[:15]}...》，请切换到上方【📂 本地沉淀文献大仓】查看报告！")
+                                            st.rerun()
+                                    else:
+                                        target_dict = {"title": a_title, "url": a_url, "paper_id": a_doc, "summary": snippet_text}
+                                        if st.button("🤖 一键深度解构", key=f"arc_decomp_v2_{arc_id}_{a_idx}", type="primary", use_container_width=True):
+                                            with st.spinner(f"正在下载并调用【论文精细化分析大脑】({analysis_name}) 解构 《{a_title[:15]}...》..."):
+                                                success, msg, pid = download_and_import_paper(target_dict, selected_analysis_model_id)
+                                                if success:
+                                                    st.success(msg)
+                                                    st.toast(f"🎉 《{a_title[:15]}...》 成功完成 AI 深度解构！")
+                                                    st.rerun()
+                                                else:
+                                                    st.error(msg)
+                                                    
+                                if is_decomp and existing_pid:
+                                    with st.expander(f"👁️ 直接展开阅读 《{a_title[:20]}...》 报告正文"):
+                                        conn_a = get_db_connection()
+                                        try:
+                                            r_sum = conn_a.execute("SELECT dialectical_analysis, model_name FROM ai_summaries WHERE paper_id = ?", (existing_pid,)).fetchone()
+                                            if r_sum and r_sum["dialectical_analysis"]:
+                                                st.caption(f"🧠 解构大脑: `{r_sum['model_name']}`")
+                                                st.markdown(r_sum["dialectical_analysis"])
+                                        finally:
+                                            conn_a.close()
+
+                        # 附带展示：AI 核心解答概括
+                        if ans_text:
+                            st.markdown("<div style='margin-top: 12px; font-weight: 700; font-size: 0.95rem; color: #1E293B;'>💡 AI 辩证解答概括:</div>", unsafe_allow_html=True)
+                            preview_ans = ans_text[:350] + ("..." if len(ans_text) > 350 else "")
+                            st.markdown(f"""
+                            <div style='background-color: #F8FAFC; border: 1px solid #E2E8F0; border-left: 4px solid #10B981; border-radius: 6px; padding: 10px 14px; margin-px 0; font-size: 0.88rem; line-height: 1.65; color: #1E293B;'>
+                                {preview_ans}
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                    # 3. 判定是否为本地大仓候选格式 (Dict 结构，包含 candidates)
+                    elif isinstance(parsed_res, dict) and "candidates" in parsed_res:
+                        cand_list = parsed_res.get("candidates", [])
+                        st.markdown(f"""
+                        <div style='background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px; padding: 14px 16px; margin-top: 10px; font-size: 0.9rem; line-height: 1.7; color: #1E293B;'>
+                            <div style='font-size: 1rem; font-weight: 700; color: #0F172A; margin-bottom: 8px; border-bottom: 1px solid #E2E8F0; padding-bottom: 6px; display: flex; align-items: center;'>
+                                <span>🗄️ 本地大仓检索候选概括</span>
+                                <span style='margin-left: auto; color: #2563EB; font-size: 0.85rem; font-weight: 600;'>📚 共命中 {len(cand_list)} 条文献</span>
+                            </div>
+                            <table style='width: 100%; border-collapse: collapse; font-size: 0.88rem;'>
+                                <tr>
+                                    <td style='width: 50%; padding: 4px 0;'><b>🔍 检索主题</b>: <code>{arc['query']}</code></td>
+                                    <td style='width: 50%; padding: 4px 0;'><b>📅 归档时间</b>: {arc['archived_at']}</td>
+                                </tr>
+                                <tr>
+                                    <td style='width: 50%; padding: 4px 0;'><b>🆔 归档流水号</b>: <code>{arc_id}</code></td>
+                                    <td style='width: 50%; padding: 4px 0;'><b>🏷️ 检索模式</b>: 双路混合离线检索</td>
+                                </tr>
+                            </table>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        st.markdown(f"<div style='margin-top: 12px; font-weight: 700; font-size: 0.95rem; color: #1E293B;'>📑 命中候选文章标题列表 ({len(cand_list)} 篇):</div>", unsafe_allow_html=True)
+                        for c_idx, c in enumerate(cand_list):
+                            c_title = c.get("title") or "未知标题"
+                            c_doc = c.get("doc_id") or "unknown"
+                            c_score = c.get("hybrid_score", 0.0)
+                            c_url = format_evidence_url(c.get("canonical_url", "#"))
+                            c_text = c.get("text", "")
+                            snippet_text = c_text[:180] + ("..." if len(c_text) > 180 else "")
+                            
+                            is_decomp, existing_pid = get_paper_deconstruction_status(title=c_title, doc_id=c_doc, url=c_url)
+
+                            with st.container(border=True):
+                                col_c_info, col_c_btn = st.columns([3.2, 1.2])
+                                with col_c_info:
+                                    st.markdown(f"**[{c_idx+1}]** <a href='{c_url}' target='_blank' style='font-size: 0.95rem; font-weight: 600; color: #2563EB; text-decoration: none;'>{c_title}</a>", unsafe_allow_html=True)
+                                    meta_c = [
+                                        f"<span style='background: #E0E7FF; color: #3730A3; padding: 1px 6px; border-radius: 4px; font-size: 0.75rem;'>{c_doc}</span>",
+                                        f"📈 检索得分: {c_score:.4f}"
+                                    ]
+                                    if is_decomp:
+                                        meta_c.append("<span style='background-color: #E0E7FF; color: #3730A3; padding: 1px 6px; border-radius: 4px; font-weight: 600; font-size: 0.75rem;'>✅ 已解构</span>")
+                                    else:
+                                        meta_c.append("<span style='background-color: #F3F4F6; color: #4B5563; padding: 1px 6px; border-radius: 4px; font-size: 0.75rem;'>⏳ 待解构</span>")
+                                    st.markdown(f"<div style='color: #64748B; font-size: 0.8rem; margin: 2px 0 4px 0;'>{' &nbsp;|&nbsp; '.join(meta_c)}</div>", unsafe_allow_html=True)
+                                    
+                                    if snippet_text:
+                                        st.markdown(f"<div style='background-color: #F8FAFC; border-radius: 4px; padding: 6px 10px; color: #475569; font-size: 0.82rem;'>📝 <b>匹配切片</b>: {snippet_text}</div>", unsafe_allow_html=True)
+                                        
+                                with col_c_btn:
+                                    st.markdown("<div style='padding-top: 4px;'></div>", unsafe_allow_html=True)
+                                    if is_decomp:
+                                        if st.button("📖 查看解构报告", key=f"arc_view_cand_{arc_id}_{c_idx}", type="primary", use_container_width=True):
+                                            st.session_state["active_view_paper_id"] = existing_pid
+                                            if "search_keyword" in st.session_state:
+                                                st.session_state["search_keyword"] = ""
+                                            st.toast(f"👉 已定位 《{c_title[:15]}...》，请切换到上方【📂 本地沉淀文献大仓】查看报告！")
+                                            st.rerun()
+                                    else:
+                                        cand_dict = {"title": c_title, "url": c_url, "paper_id": c_doc, "summary": snippet_text}
+                                        if st.button("🤖 一键深度解构", key=f"arc_decomp_cand_{arc_id}_{c_idx}", type="primary", use_container_width=True):
+                                            with st.spinner(f"正在下载并调用【论文精细化分析大脑】({analysis_name}) 解构 《{c_title[:15]}...》..."):
+                                                success, msg, pid = download_and_import_paper(cand_dict, selected_analysis_model_id)
+                                                if success:
+                                                    st.success(msg)
+                                                    st.toast(f"🎉 《{c_title[:15]}...》 成功完成 AI 深度解构！")
+                                                    st.rerun()
+                                                else:
+                                                    st.error(msg)
+
+                    # 4. 其他结构兜底提取
+                    else:
+                        st.markdown(f"""
+                        <div style='background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px; padding: 14px 16px; margin-top: 10px;'>
+                            <div style='font-weight: 700; color: #0F172A; margin-bottom: 6px;'>🗄️ 归档历史快照: <code>{arc['query']}</code></div>
+                            <div style='color: #64748B; font-size: 0.82rem;'>归档时间: {arc['archived_at']} | 编号: {arc_id}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
 
 with tab_local_search:
     st.subheader("🔎 本地文献大仓双路检索")
@@ -1722,33 +2285,67 @@ with tab_global_config:
         selected_edit_model = st.selectbox(
             "选择要编辑或配置的模型",
             options=edit_modes,
-            index=0
+            index=0,
+            key="selected_edit_model_select"
         )
         
         st.markdown("---")
         
         if selected_edit_model == "新建模型提供商":
             st.markdown("**➕ 注册新的 API 大脑**")
-            new_id = st.text_input("模型唯一标识 ID (如: qwen-max)", placeholder="仅限小写字母 and 中划线")
-            new_name = st.text_input("显示名称 (如: Qwen Max (通义千问))")
-            new_provider = st.selectbox("API 驱动类型 (Provider)", ["openai_compatible", "gemini"])
-            new_model_name = st.text_input("接口模型 ID (Model Name, 如: qwen-max)", placeholder="对应的 API 官方模型名")
-            new_api_key = st.text_input("API Key (为空则自动读取环境变量)", type="password")
-            new_env = st.text_input("API Key 对应的环境变量名 (如: QWEN_API_KEY)")
-            new_url = st.text_input("API 终结点 Endpoint URL (OpenAI 兼容类型必填)", placeholder="如: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
             
-            # 默认 JSON 参数模板
+            # 允许用户选择已有的配置作为模板快速复制填充
+            template_options = ["不使用模板 (空白创建)"] + list(api_models.keys())
+            selected_template = st.selectbox(
+                "📋 选择已有模型配置作为模板 (自动导入 Provider/API Key/Endpoint 等配置)",
+                options=template_options,
+                index=0,
+                format_func=lambda x: "不使用模板 (空白创建)" if x == "不使用模板 (空白创建)" else f"基于「{api_models[x].get('name', x)}」导入",
+                key="select_new_model_template"
+            )
+            
+            template_cfg = api_models.get(selected_template, {}) if selected_template != "不使用模板 (空白创建)" else {}
+            
+            # 从模板中解析预填充值
+            init_provider = template_cfg.get("provider", "openai_compatible")
+            provider_index = ["openai_compatible", "gemini"].index(init_provider) if init_provider in ["openai_compatible", "gemini"] else 0
+            
+            init_model_name = template_cfg.get("model", "")
+            init_api_key = template_cfg.get("api_key", "")
+            init_env = template_cfg.get("api_key_env", "")
+            init_url = template_cfg.get("url", "")
+            
             default_json_template = """{
     "extra_body": {
         "enable_thinking": true
     }
 }"""
+            if selected_template != "不使用模板 (空白创建)":
+                saved_template_custom_params = template_cfg.get("custom_params", {})
+                init_custom_params_str = json.dumps(saved_template_custom_params, ensure_ascii=False, indent=4) if saved_template_custom_params else ""
+            else:
+                init_custom_params_str = ""
+            
+            new_id = st.text_input("模型唯一标识 ID (如: qwen-max)", placeholder="仅限小写字母 and 中划线", key=f"new_model_id_{selected_template}")
+            new_name = st.text_input("显示名称 (如: Qwen Max (通义千问))", placeholder="对应的显示名称", key=f"new_model_name_disp_{selected_template}")
+            new_provider = st.selectbox("API 驱动类型 (Provider)", ["openai_compatible", "gemini"], index=provider_index, key=f"new_model_provider_{selected_template}")
+            new_model_name = st.text_input("接口模型 ID (Model Name, 如: qwen-max)", value=init_model_name, placeholder="对应的 API 官方模型名", key=f"new_model_name_api_{selected_template}")
+            new_api_key = st.text_input("API Key (为空则自动读取环境变量)", value=init_api_key, type="password", key=f"new_model_key_{selected_template}")
+            new_env = st.text_input("API Key 对应的环境变量名 (如: QWEN_API_KEY)", value=init_env, key=f"new_model_env_{selected_template}")
+            new_url = st.text_input("API 终结点 Endpoint URL (OpenAI 兼容类型必填)", value=init_url, placeholder="如: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", key=f"new_model_url_{selected_template}")
             
             # 自定义请求参数输入框 (选填，JSON格式)
             new_custom_params_str = st.text_area(
                 "自定义额外 API 参数 (JSON 格式，选填。每个选项建议占一行，字符串/键名须双引号，布尔值须为小写的 true/false)", 
-                value=default_json_template,
-                help="如果您的非标准 API 终结点需要额外的参数，可以在此指定。请用标准的 JSON 格式，每一对配置选项最好放在单独的一行，以便于阅读和管理。"
+                value=init_custom_params_str,
+                placeholder="""如需额外参数可在此填写 JSON，例如:
+{
+    "extra_body": {
+        "enable_thinking": true
+    }
+}""",
+                help="如果您的非标准 API 终结点需要额外的参数，可以在此指定。请用标准的 JSON 格式，每一对配置选项最好放在单独的一行，以便于阅读和管理。",
+                key=f"new_custom_params_str_{selected_template}"
             )
             
             # 实时进行 JSON 格式的就地检测与状态反馈
@@ -1766,7 +2363,7 @@ with tab_global_config:
                     st.warning(f"⚠️ JSON 格式不正确 (键/字符串须双引号，布尔须小写，例如使用 true 而非 Python 的 True): {je}")
                     is_new_json_valid = False
             
-            if st.button("➕ 确认注册并保存"):
+            if st.button("➕ 确认注册并保存", key=f"btn_register_new_model_{selected_template}"):
                 if not is_new_json_valid:
                     st.error("❌ 自定义额外 API 参数 JSON 格式校验失败，请修改后再保存。")
                 elif not new_id or not new_name or not new_model_name:
@@ -1782,35 +2379,35 @@ with tab_global_config:
             cfg = api_models[selected_edit_model]
             st.markdown(f"**📝 编辑模型：`{cfg.get('name')}`**")
             
-            edit_name = st.text_input("显示名称", value=cfg.get("name", ""))
-            edit_provider = st.selectbox("API 驱动类型 (Provider)", ["openai_compatible", "gemini"], index=["openai_compatible", "gemini"].index(cfg.get("provider", "openai_compatible")))
-            edit_model_name = st.text_input("接口模型 ID (Model Name)", value=cfg.get("model", ""))
+            edit_name = st.text_input("显示名称", value=cfg.get("name", ""), key=f"edit_name_{selected_edit_model}")
+            edit_provider = st.selectbox("API 驱动类型 (Provider)", ["openai_compatible", "gemini"], index=["openai_compatible", "gemini"].index(cfg.get("provider", "openai_compatible")), key=f"edit_provider_{selected_edit_model}")
+            edit_model_name = st.text_input("接口模型 ID (Model Name)", value=cfg.get("model", ""), key=f"edit_model_{selected_edit_model}")
             
             # 显示密文框，只在用户手动修改时提交
-            edit_api_key = st.text_input("API Key (如果已配置，留空则保持原配置)", type="password", placeholder="已加密保存")
+            edit_api_key = st.text_input("API Key (如果已配置，留空则保持原配置)", type="password", placeholder="已加密保存", key=f"edit_key_{selected_edit_model}")
             
             # 读取已保存的 api_key
             original_api_key = cfg.get("api_key", "")
             
-            edit_env = st.text_input("API Key 对应的环境变量名", value=cfg.get("api_key_env", ""))
-            edit_url = st.text_input("API 终结点 Endpoint URL", value=cfg.get("url", ""))
+            edit_env = st.text_input("API Key 对应的环境变量名", value=cfg.get("api_key_env", ""), key=f"edit_env_{selected_edit_model}")
+            edit_url = st.text_input("API 终结点 Endpoint URL", value=cfg.get("url", ""), key=f"edit_url_{selected_edit_model}")
             
             # 获取已保存的 custom_params
             saved_custom_params = cfg.get("custom_params", {})
-            
-            # 默认 JSON 参数模板
-            default_json_template = """{
-    "extra_body": {
-        "enable_thinking": true
-    }
-}"""
-            saved_custom_params_str = json.dumps(saved_custom_params, ensure_ascii=False, indent=4) if saved_custom_params else default_json_template
+            saved_custom_params_str = json.dumps(saved_custom_params, ensure_ascii=False, indent=4) if saved_custom_params else ""
             
             # 自定义请求参数输入框 (选填，JSON格式)
             edit_custom_params_str = st.text_area(
                 "自定义额外 API 参数 (JSON 格式，选填。每个选项建议占一行，字符串/键名须双引号，布尔值须为小写的 true/false)", 
                 value=saved_custom_params_str,
-                help="如果您的非标准 API 终结点需要额外的参数，可以在此指定。请用标准的 JSON 格式，每一对配置选项最好放在单独的一行，以便于阅读和管理。"
+                placeholder="""如需额外参数可在此填写 JSON，例如:
+{
+    "extra_body": {
+        "enable_thinking": true
+    }
+}""",
+                help="如果您的非标准 API 终结点需要额外的参数，可以在此指定。请用标准的 JSON 格式，每一对配置选项最好放在单独的一行，以便于阅读和管理。",
+                key=f"edit_custom_params_{selected_edit_model}"
             )
             
             # 实时进行 JSON 格式的就地检测与状态反馈
@@ -1830,7 +2427,7 @@ with tab_global_config:
             
             col_btn1, col_btn2 = st.columns([1, 1])
             with col_btn1:
-                if st.button("💾 保存模型修改"):
+                if st.button("💾 保存模型修改", key=f"btn_save_model_{selected_edit_model}"):
                     if not is_edit_json_valid:
                         st.error("❌ 自定义额外 API 参数 JSON 格式校验失败，请修改后再保存。")
                     else:
@@ -1840,7 +2437,7 @@ with tab_global_config:
                             st.success("🎉 模型配置修改已成功保存！")
                             st.rerun()
             with col_btn2:
-                if st.button("🗑️ 彻底删除该模型配置"):
+                if st.button("🗑️ 彻底删除该模型配置", key=f"btn_delete_model_{selected_edit_model}"):
                     if delete_model_config(selected_edit_model):
                         st.success(f"🗑️ 模型 {selected_edit_model} 已从大仓中安全注销并移除！")
                         st.rerun()

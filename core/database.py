@@ -263,6 +263,29 @@ def init_db():
         )
     ''')
 
+    # 2.12 联网搜索中断挂起与断点恢复任务表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS suspended_search_tasks (
+            task_id TEXT PRIMARY KEY,
+            query TEXT NOT NULL,
+            filter_type TEXT NOT NULL DEFAULT 'arxiv_paper',
+            allow_web_search INTEGER DEFAULT 1,
+            force_penetrate INTEGER DEFAULT 0,
+            model_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('suspended', 'running', 'completed', 'failed')),
+            current_step TEXT NOT NULL,
+            error_step TEXT,
+            error_message TEXT,
+            completed_steps_json TEXT NOT NULL DEFAULT '[]',
+            remaining_steps_json TEXT NOT NULL DEFAULT '[]',
+            intermediate_data_json TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_suspended_tasks_status ON suspended_search_tasks(status);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_suspended_tasks_created ON suspended_search_tasks(created_at);")
+
     conn.commit()
 
     # === 3. 播种初始商业计费规则 (Seed Pricing Data) ===
@@ -295,6 +318,45 @@ def init_db():
         
     conn.commit()
     conn.close()
+    
+    # 同步 V2 沉淀库与 V1 大仓，确保两端资产双向对齐
+    sync_ingested_documents_to_papers()
+
+def sync_ingested_documents_to_papers():
+    """将 V2 documents 中已通过 2PC 沉淀的文献同步至 papers 与 ai_summaries 表（INSERT OR IGNORE），确保大仓视图完整统一"""
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO papers (paper_id, title, authors, venue, year, abstract, pdf_path, source_engine)
+            SELECT 
+                d.doc_id, 
+                d.title, 
+                COALESCE(d.authors, '未知作者'), 
+                CASE WHEN d.doc_id LIKE 'arxiv%' OR d.canonical_url LIKE '%arxiv.org%' THEN 'arXiv' ELSE '网络文献大仓' END, 
+                2025, 
+                COALESCE(c.ai_summary, d.title), 
+                d.local_path, 
+                'v2_sync'
+            FROM documents d
+            LEFT JOIN document_contents c ON d.doc_id = c.doc_id
+            WHERE d.status = 'ingested'
+        """)
+        conn.execute("""
+            INSERT OR IGNORE INTO ai_summaries (paper_id, model_name, dialectical_analysis)
+            SELECT 
+                d.doc_id, 
+                COALESCE(d.analysis_model, 'AI 知识大仓沉淀'), 
+                COALESCE(c.full_text_markdown, c.ai_summary, '文档已通过 2PC 完整沉淀入库。')
+            FROM documents d
+            LEFT JOIN document_contents c ON d.doc_id = c.doc_id
+            WHERE d.status = 'ingested'
+        """)
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"同步 V2 documents 到 papers 失败: {e}")
+    finally:
+        conn.close()
+
     logger.info("数据库核心表及规则种子完成初始化。")
 
 # === 4. 保留并重构 V1 的数据操作函数以保持系统稳定性 ===
@@ -382,5 +444,238 @@ def delete_paper_metadata(paper_id):
         # Then delete from papers table
         cursor.execute('DELETE FROM papers WHERE paper_id = ?', (paper_id,))
         conn.commit()
+    finally:
+        conn.close()
+
+# === 5. 挂起任务与断点恢复数据操作函数 ===
+
+def insert_suspended_task(task_dict):
+    """插入或更新挂起任务"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT OR REPLACE INTO suspended_search_tasks (
+                task_id, query, filter_type, allow_web_search, force_penetrate,
+                model_id, status, current_step, error_step, error_message,
+                completed_steps_json, remaining_steps_json, intermediate_data_json,
+                updated_at
+            ) VALUES (
+                :task_id, :query, :filter_type, :allow_web_search, :force_penetrate,
+                :model_id, :status, :current_step, :error_step, :error_message,
+                :completed_steps_json, :remaining_steps_json, :intermediate_data_json,
+                CURRENT_TIMESTAMP
+            )
+        ''', task_dict)
+        conn.commit()
+    finally:
+        conn.close()
+
+def update_suspended_task_status(task_id, status, current_step=None, error_step=None, error_message=None, completed_steps_json=None, remaining_steps_json=None, intermediate_data_json=None):
+    """更新挂起任务的状态和进度"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        updates = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+        params = [status]
+        if current_step is not None:
+            updates.append("current_step = ?")
+            params.append(current_step)
+        if error_step is not None:
+            updates.append("error_step = ?")
+            params.append(error_step)
+        if error_message is not None:
+            updates.append("error_message = ?")
+            params.append(error_message)
+        if completed_steps_json is not None:
+            updates.append("completed_steps_json = ?")
+            params.append(completed_steps_json)
+        if remaining_steps_json is not None:
+            updates.append("remaining_steps_json = ?")
+            params.append(remaining_steps_json)
+        if intermediate_data_json is not None:
+            updates.append("intermediate_data_json = ?")
+            params.append(intermediate_data_json)
+        params.append(task_id)
+        
+        sql = f"UPDATE suspended_search_tasks SET {', '.join(updates)} WHERE task_id = ?"
+        cursor.execute(sql, tuple(params))
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_suspended_tasks(status=None):
+    """获取所有挂起/未完全完成的联网搜索任务（按时间倒序）"""
+    conn = get_db_connection()
+    try:
+        if status:
+            rows = conn.execute(
+                'SELECT * FROM suspended_search_tasks WHERE status = ? ORDER BY created_at DESC', 
+                (status,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT * FROM suspended_search_tasks ORDER BY created_at DESC'
+            ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+def get_suspended_task_by_id(task_id):
+    """根据 task_id 获取单个任务详情"""
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT * FROM suspended_search_tasks WHERE task_id = ?', (task_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+def delete_suspended_task(task_id):
+    """删除指定的挂起任务记录"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('DELETE FROM suspended_search_tasks WHERE task_id = ?', (task_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+def extract_arxiv_id(text):
+    """从文本、URL 或 ID 中提取标准的 4位年份.4-5位序列号 arXiv ID"""
+    if not text:
+        return None
+    import re
+    m = re.search(r'(\d{4}\.\d{4,5})', str(text))
+    return m.group(1) if m else None
+
+def get_paper_deconstruction_status(title=None, doc_id=None, url=None):
+    """
+    检查某篇文献或报告在本地大仓中是否已经完成 AI 深度解构或 2PC 沉淀。
+    多维度对账检索：
+    1. 优先按 doc_id / paper_id 对账
+    2. 按 URL / Canonical URL / 自动提取的 arXiv ID (如 2502.14051) 对账
+    3. 按标题精确 / 核心前缀 / 规范化词频对账
+    4. 支持跨 V1 (papers + ai_summaries) 与 V2 (documents + document_contents) 统一自动桥接
+    返回 (is_deconstructed: bool, paper_id: str or None)
+    """
+    conn = get_db_connection()
+    try:
+        # 1. 提取可能包含的 arXiv ID (如 2502.14051)
+        arx_id = extract_arxiv_id(url) or extract_arxiv_id(doc_id) or extract_arxiv_id(title)
+        
+        # 2. 第一路：检索 V1 papers + ai_summaries (已有全景解构报告)
+        if doc_id:
+            row = conn.execute("""
+                SELECT p.paper_id, s.dialectical_analysis 
+                FROM papers p 
+                LEFT JOIN ai_summaries s ON p.paper_id = s.paper_id 
+                WHERE p.paper_id = ?
+            """, (doc_id,)).fetchone()
+            if row and row["dialectical_analysis"] and not row["dialectical_analysis"].startswith("❌"):
+                return True, row["paper_id"]
+
+        if arx_id:
+            row = conn.execute("""
+                SELECT p.paper_id, s.dialectical_analysis 
+                FROM papers p 
+                LEFT JOIN ai_summaries s ON p.paper_id = s.paper_id 
+                WHERE (p.paper_id LIKE ? OR p.pdf_path LIKE ? OR p.title LIKE ?)
+                  AND s.dialectical_analysis IS NOT NULL 
+                  AND s.dialectical_analysis NOT LIKE '❌%'
+            """, (f"%{arx_id}%", f"%{arx_id}%", f"%{arx_id}%")).fetchone()
+            if row and row["dialectical_analysis"] and not row["dialectical_analysis"].startswith("❌"):
+                return True, row["paper_id"]
+
+        if title:
+            safe_t = title.strip()
+            # 2.1 精确匹配
+            row = conn.execute("""
+                SELECT p.paper_id, s.dialectical_analysis 
+                FROM papers p 
+                LEFT JOIN ai_summaries s ON p.paper_id = s.paper_id 
+                WHERE p.title = ?
+            """, (safe_t,)).fetchone()
+            if row and row["dialectical_analysis"] and not row["dialectical_analysis"].startswith("❌"):
+                return True, row["paper_id"]
+                
+            # 2.2 核心前缀匹配 (如 "RocketKV: ...")
+            core_prefix = safe_t.split(":")[0].strip() if ":" in safe_t else (safe_t[:30] if len(safe_t) >= 6 else safe_t)
+            if len(core_prefix) >= 5:
+                row = conn.execute("""
+                    SELECT p.paper_id, s.dialectical_analysis 
+                    FROM papers p 
+                    LEFT JOIN ai_summaries s ON p.paper_id = s.paper_id 
+                    WHERE (p.title LIKE ? OR p.title LIKE ?)
+                      AND s.dialectical_analysis IS NOT NULL 
+                      AND s.dialectical_analysis NOT LIKE '❌%'
+                """, (f"{core_prefix}%", f"%{core_prefix}%")).fetchone()
+                if row and row["dialectical_analysis"] and not row["dialectical_analysis"].startswith("❌"):
+                    return True, row["paper_id"]
+
+        # 3. 第二路：检索 V2 documents (已通过 2PC 沉淀入库)
+        doc_row = None
+        if doc_id:
+            doc_row = conn.execute("""
+                SELECT d.*, c.full_text_markdown, c.ai_summary 
+                FROM documents d 
+                LEFT JOIN document_contents c ON d.doc_id = c.doc_id 
+                WHERE d.doc_id = ? AND d.status = 'ingested'
+            """, (doc_id,)).fetchone()
+
+        if not doc_row and arx_id:
+            doc_row = conn.execute("""
+                SELECT d.*, c.full_text_markdown, c.ai_summary 
+                FROM documents d 
+                LEFT JOIN document_contents c ON d.doc_id = c.doc_id 
+                WHERE (d.canonical_url LIKE ? OR d.doc_id LIKE ? OR d.title LIKE ?) AND d.status = 'ingested'
+            """, (f"%{arx_id}%", f"%{arx_id}%", f"%{arx_id}%")).fetchone()
+
+        if not doc_row and url:
+            doc_row = conn.execute("""
+                SELECT d.*, c.full_text_markdown, c.ai_summary 
+                FROM documents d 
+                LEFT JOIN document_contents c ON d.doc_id = c.doc_id 
+                WHERE d.canonical_url = ? AND d.status = 'ingested'
+            """, (url,)).fetchone()
+
+        if not doc_row and title:
+            safe_t = title.strip()
+            core_prefix = safe_t.split(":")[0].strip() if ":" in safe_t else (safe_t[:30] if len(safe_t) >= 6 else safe_t)
+            doc_row = conn.execute("""
+                SELECT d.*, c.full_text_markdown, c.ai_summary 
+                FROM documents d 
+                LEFT JOIN document_contents c ON d.doc_id = c.doc_id 
+                WHERE (d.title = ? OR d.title LIKE ? OR d.title LIKE ?) AND d.status = 'ingested'
+            """, (safe_t, f"{core_prefix}%", f"%{core_prefix}%")).fetchone()
+
+        if doc_row:
+            d_id = doc_row["doc_id"]
+            d_title = doc_row["title"]
+            d_authors = doc_row["authors"] or "未知作者"
+            d_venue = "arXiv" if ("arxiv" in d_id.lower() or "arxiv.org" in str(doc_row["canonical_url"])) else "网络大仓沉淀"
+            d_analysis = doc_row["full_text_markdown"] or doc_row["ai_summary"] or "文档已通过 2PC 完整沉淀入库。"
+            d_model = doc_row["analysis_model"] or "AI 知识大仓沉淀"
+            
+            # 自动将 V2 沉淀文献桥接至 papers & ai_summaries，确保 Tab 1 本地大仓无缝可读
+            try:
+                conn.execute("""
+                    INSERT OR IGNORE INTO papers (paper_id, title, authors, venue, year, abstract, pdf_path, source_engine)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (d_id, d_title, d_authors, d_venue, 2025, d_analysis[:300], None, "v2_ingested_sync"))
+                
+                conn.execute("""
+                    INSERT OR IGNORE INTO ai_summaries (paper_id, model_name, dialectical_analysis)
+                    VALUES (?, ?, ?)
+                """, (d_id, d_model, d_analysis))
+                conn.commit()
+            except Exception as bridge_e:
+                logger.warning(f"桥接同步 V2 沉淀文献至 papers 失败: {bridge_e}")
+                
+            return True, d_id
+
+        return False, None
+    except Exception as e:
+        logger.warning(f"检查解构状态异常: {e}")
+        return False, None
     finally:
         conn.close()

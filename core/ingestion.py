@@ -136,6 +136,21 @@ class IngestionCoordinator:
             (target_status, doc_payload.get('llm_score', 0.0), doc_payload.get('score_reason_json', '{}'), doc_payload.get('scored_by_model', 'deepseek-v4-flash'), doc_id)
         ))
 
+        # 桥接写入 papers 与 ai_summaries 表，确保大仓与视图即刻同步可用
+        d_title = doc_payload.get('title', '')
+        d_authors = doc_payload.get('authors') or '未知作者'
+        d_venue = 'arXiv' if ('arxiv' in doc_id.lower() or 'arxiv.org' in str(doc_payload.get('canonical_url', ''))) else '网络文献大仓'
+        d_analysis = doc_payload.get('full_text_markdown') or doc_payload.get('ai_summary') or '文档已通过 2PC 完整沉淀入库。'
+        d_model = doc_payload.get('analysis_model') or 'AI 知识大仓沉淀'
+        commit_sql_pipeline.append((
+            "INSERT OR IGNORE INTO papers (paper_id, title, authors, venue, year, abstract, pdf_path, source_engine) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (doc_id, d_title, d_authors, d_venue, 2025, d_analysis[:300], None, "v2_2pc_ingested")
+        ))
+        commit_sql_pipeline.append((
+            "INSERT OR IGNORE INTO ai_summaries (paper_id, model_name, dialectical_analysis) VALUES (?, ?, ?)",
+            (doc_id, d_model, d_analysis)
+        ))
+
         try:
             logger.info(f"Ingestion 2PC Phase 3: SQLite 串行提交终审事务。DocID: {doc_id}")
             commit_success = await self.writer.execute_write(commit_sql_pipeline)
@@ -418,19 +433,12 @@ async def ingest_pdf_to_v2(
     except Exception as e:
         logger.warning(f"V2 幂等检查出现异常（继续执行摄取）: {e}")
 
-    # --- 提取 PDF 全文 ---
-    full_text = ""
-    try:
-        import pypdf
-        reader = pypdf.PdfReader(pdf_path)
-        for page in reader.pages:
-            full_text += page.extract_text() or ""
-    except Exception as e:
-        logger.error(f"V2 PDF 文本提取失败，doc_id={doc_id}: {e}")
-        return False
+    # --- 提取 PDF / 物理文档全文 ---
+    from .ai_analyst import extract_text_from_pdf
+    full_text = extract_text_from_pdf(pdf_path)
 
-    if not full_text.strip():
-        logger.warning(f"V2 PDF 文本为空，放弃摄取。doc_id={doc_id}")
+    if not full_text or not full_text.strip():
+        logger.warning(f"V2 PDF/文档文本为空，放弃摄取。doc_id={doc_id}")
         return False
 
     # --- 文本分片 ---

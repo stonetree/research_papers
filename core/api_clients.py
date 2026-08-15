@@ -26,12 +26,19 @@ class LocalComputeKernelClient:
 
     async def check_embedding_service_health(self) -> bool:
         """
-        心跳检测：检查本地 8081 端口 Embedding 服务是否处于 Ready 就绪状态
+        心跳检测：检查本地 8081 端口 Embedding 服务是否处于 Ready 就绪状态 (优先快速探测 /v1/models)
         """
         try:
+            models_url = self.embedding_url.replace("/v1/embeddings", "/v1/models")
             async with aiohttp.ClientSession() as session:
-                payload = {"input": "healthcheck", "model": "qwen3-embedding"}
-                async with session.post(self.embedding_url, json=payload, timeout=2) as resp:
+                try:
+                    async with session.get(models_url, timeout=0.4) as resp:
+                        if resp.status == 200:
+                            return True
+                except Exception:
+                    pass
+                payload = {"input": "ping", "model": "qwen3-embedding"}
+                async with session.post(self.embedding_url, json=payload, timeout=0.8) as resp:
                     return resp.status == 200
         except Exception:
             return False
@@ -43,12 +50,19 @@ class LocalComputeKernelClient:
 
     async def check_rerank_service_health(self) -> bool:
         """
-        心跳检测：检查本地 8082 端口 Rerank 服务是否处于 Ready 就绪状态
+        心跳检测：检查本地 8082 端口 Rerank 服务是否处于 Ready 就绪状态 (优先快速探测 /v1/models)
         """
         try:
+            models_url = self.rerank_url.replace("/v1/rerank", "/v1/models")
             async with aiohttp.ClientSession() as session:
-                payload = {"query": "healthcheck", "documents": ["ping"], "model": "qwen3-reranker"}
-                async with session.post(self.rerank_url, json=payload, timeout=2) as resp:
+                try:
+                    async with session.get(models_url, timeout=0.4) as resp:
+                        if resp.status == 200:
+                            return True
+                except Exception:
+                    pass
+                payload = {"query": "ping", "documents": ["ping"], "model": "qwen3-reranker"}
+                async with session.post(self.rerank_url, json=payload, timeout=0.8) as resp:
                     return resp.status == 200
         except Exception:
             return False

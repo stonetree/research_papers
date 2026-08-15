@@ -123,25 +123,62 @@ def clean_json_string(text):
                 text = text[4:]
     return text.strip()
 
-def extract_text_from_pdf(pdf_path):
-    """从 PDF 文件中提取文本（适用于非原生多模态大语言模型，如 DeepSeek）"""
-    print(f"📄 [PDF 文本提取] 开始读取本地 PDF 物理文件: {pdf_path}")
+def is_valid_pdf_file(file_path):
+    """检查本地文件是否为标准合规的二进制 PDF（以 %PDF- 开头）"""
+    if not file_path or not os.path.exists(file_path):
+        return False
     try:
-        import pypdf
-        reader = pypdf.PdfReader(pdf_path)
-        text = ""
-        total_pages = len(reader.pages)
-        print(f"📄 [PDF 文本提取] 检测到 PDF 共 {total_pages} 页。正在逐页提取文本...")
-        for i, page in enumerate(reader.pages):
-            page_text = page.extract_text() or ""
-            text += page_text
-            if (i + 1) % 5 == 0 or (i + 1) == total_pages:
-                print(f"⏳ [PDF 文本提取] 已成功处理并提取 {i+1}/{total_pages} 页...")
-        print(f"📄 [PDF 文本提取完成] 成功读取所有页面，共提取 {len(text)} 字符。")
-        return text
-    except Exception as e:
-        print(f"❌ [PDF 文本提取失败] 读取/解析 PDF 发生异常: {e}")
+        with open(file_path, 'rb') as f:
+            header = f.read(5)
+            return header.startswith(b'%PDF-')
+    except Exception:
+        return False
+
+def extract_text_from_pdf(pdf_path):
+    """从本地文件（PDF / HTML / 纯文本）中鲁棒提取全文"""
+    if not pdf_path or not os.path.exists(pdf_path):
         return ""
+    print(f"📄 [文档文本提取] 开始读取本地物理文件: {pdf_path}")
+    
+    # 1. 尝试作为标准 PDF 读取
+    if is_valid_pdf_file(pdf_path):
+        try:
+            import pypdf
+            reader = pypdf.PdfReader(pdf_path)
+            text = ""
+            total_pages = len(reader.pages)
+            print(f"📄 [PDF 文本提取] 检测到标准 PDF 共 {total_pages} 页。正在逐页提取文本...")
+            for i, page in enumerate(reader.pages):
+                page_text = page.extract_text() or ""
+                text += page_text
+                if (i + 1) % 5 == 0 or (i + 1) == total_pages:
+                    print(f"⏳ [PDF 文本提取] 已成功处理并提取 {i+1}/{total_pages} 页...")
+            if text.strip():
+                print(f"📄 [PDF 文本提取完成] 成功读取所有页面，共提取 {len(text)} 字符。")
+                return text
+        except Exception as e:
+            print(f"⚠️ [PDF 文本提取异常，尝试格式降级]: {e}")
+
+    # 2. 如果不是 PDF 或 PDF 提取为空，尝试作为 HTML 或纯文本读取
+    try:
+        with open(pdf_path, 'r', encoding='utf-8', errors='ignore') as f:
+            raw_content = f.read()
+        if "<html" in raw_content.lower() or "<body" in raw_content.lower() or "<!doctype html" in raw_content.lower():
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(raw_content, "html.parser")
+            for s in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+                s.decompose()
+            text = soup.get_text(separator="\n", strip=True)
+            if text.strip():
+                print(f"📄 [HTML 文本提取完成] 成功从 HTML 网页解析提取 {len(text)} 字符。")
+                return text
+        elif raw_content.strip():
+            print(f"📄 [纯文本读取完成] 成功读取 {len(raw_content)} 字符。")
+            return raw_content.strip()
+    except Exception as e:
+        print(f"❌ [文档文本提取失败]: {e}")
+
+    return ""
 
 def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
     from .database import resolve_pdf_path, get_db_connection
@@ -255,26 +292,97 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
             return err_msg
             
         client = genai.Client(api_key=api_key)
-        
         print(f"🤖 深度模型激活 [{display_name}]：正在剖析 《{title}》...")
-        try:
-            print(f"📤 [Gemini 文件上传] 正在将物理 PDF 上传至 Gemini API (多模态原生输入)...")
-            uploaded_file = client.files.upload(file=pdf_path)
-            print(f"📡 [Gemini 文件上传] 物理 PDF 已成功上传至 Gemini 云端，文件 ID: {uploaded_file.name}")
-            while uploaded_file.state.name == "PROCESSING":
-                print(f"⏳ [Gemini 预处理] 正在云端对 PDF 进行安全及多模态预处理，等待 2 秒...")
-                import time; time.sleep(2)
-                uploaded_file = client.files.get(name=uploaded_file.name)
-                
-            print(f"✅ [Gemini 预处理完成] 文件状态已就绪 (ID: {uploaded_file.name})。")
-            
-            # 如果是手动添加的文献，先通过 Gemini 提炼出真实论文标题并更新数据库关联
+        
+        analysis_result = None
+        is_pdf = is_valid_pdf_file(pdf_path)
+        
+        # 1. 优先尝试 Gemini 原生多模态 PDF 上传分析（仅针对标准二进制 PDF 文件）
+        if is_pdf:
+            uploaded_file = None
+            try:
+                print(f"📤 [Gemini 文件上传] 正在将物理 PDF 上传至 Gemini API (多模态原生输入)...")
+                uploaded_file = client.files.upload(file=pdf_path)
+                print(f"📡 [Gemini 文件上传] 物理 PDF 已成功上传至 Gemini 云端，文件 ID: {uploaded_file.name}")
+                while uploaded_file.state.name == "PROCESSING":
+                    print(f"⏳ [Gemini 预处理] 正在云端对 PDF 进行安全及多模态预处理，等待 2 秒...")
+                    import time; time.sleep(2)
+                    uploaded_file = client.files.get(name=uploaded_file.name)
+                    
+                if uploaded_file.state.name == "ACTIVE":
+                    print(f"✅ [Gemini 预处理完成] 文件状态已就绪 (ID: {uploaded_file.name})。")
+                    
+                    # 如果是手动添加的文献，先通过 Gemini 提炼出真实论文标题并更新数据库关联
+                    if is_manual:
+                        try:
+                            print(f"🔍 [Gemini 标题提取] 手动导入的文献，正在发送标题提取请求...")
+                            title_response = client.models.generate_content(
+                                model=model_name,
+                                contents=[uploaded_file, "请直接给出这篇论文的官方英文或中文真实标题，不需要任何其他解释、前缀、双引号或标点。只返回标题本身即可。"],
+                                config=types.GenerateContentConfig(temperature=0.0)
+                            )
+                            extracted_title = title_response.text.strip().replace('"', '').replace("'", "").replace("`", "")
+                            if extracted_title and len(extracted_title) > 3 and not extracted_title.startswith("❌"):
+                                conn = get_db_connection()
+                                conn.execute("UPDATE papers SET title = ? WHERE paper_id = ?", (extracted_title, paper_id))
+                                conn.commit()
+                                conn.close()
+                                print(f"✅ 成功提取并关联论文真实标题: {extracted_title}")
+                        except Exception as e:
+                            print(f"⚠️ 提取论文真实标题失败: {e}")
+          
+                    print(f"🚀 [Gemini 请求发送] 正在向 {display_name} ({model_name}) 发起多模态学术解构请求，等待大模型生成报告中...")
+                    import time
+                    for attempt in range(3):
+                        try:
+                            response = client.models.generate_content(
+                                model=model_name,
+                                contents=[uploaded_file, f"请全面解构此论文: {title}"],
+                                config=types.GenerateContentConfig(
+                                    system_instruction=system_instruction,
+                                    temperature=0.1
+                                )
+                            )
+                            if response and response.text:
+                                analysis_result = response.text
+                                break
+                        except Exception as gen_err:
+                            err_str = str(gen_err)
+                            if ("503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str) and attempt < 2:
+                                print(f"⏳ [Gemini 请求遇到瞬时负载 (503/429)] 第 {attempt+1}/3 次重试中...")
+                                time.sleep(3 * (attempt + 1))
+                                continue
+                            raise gen_err
+            except Exception as e:
+                print(f"⚠️ [Gemini 原生多模态解析未成功] ({e})，正在自动无缝降级为全文本级深度解构通道...")
+            finally:
+                if uploaded_file:
+                    try:
+                        client.files.delete(name=uploaded_file.name)
+                        print(f"🧹 [Gemini 临时文件清理] 已删除云端临时文件: {uploaded_file.name}")
+                    except Exception:
+                        pass
+
+        # 2. 如果多模态未成功或文件不是标准 PDF，无缝降级为全文本提取模式
+        if not analysis_result:
+            print(f"🔄 [多模态降级兜底] 触发文本级深度解构兜底流程...")
+            paper_text = extract_text_from_pdf(pdf_path)
+            if not paper_text:
+                err_msg = "❌ [文档文本提取失败] 提取文本为空，无法完成 AI 分析。"
+                print(err_msg)
+                save_ai_summary(paper_id, f"{display_name} ({model_name})", err_msg)
+                return err_msg
+
+            max_char_limit = 80000
+            if len(paper_text) > max_char_limit:
+                paper_text = paper_text[:max_char_limit] + "\n\n[...部分过长附录/参考文献文本已由系统安全截断以提升传输稳定性...]"
+                print(f"✂️ [文本裁切] 文本长度超过 {max_char_limit}，已自动截断以保证 API 传输稳定性。")
+
             if is_manual:
                 try:
-                    print(f"🔍 [Gemini 标题提取] 手动导入的文献，正在发送标题提取请求...")
                     title_response = client.models.generate_content(
                         model=model_name,
-                        contents=[uploaded_file, "请直接给出这篇论文的官方英文或中文真实标题，不需要任何其他解释、前缀、双引号或标点。只返回标题本身即可。"],
+                        contents=[f"从以下论文文本开头提取官方真实标题，只返回标题本身：\n\n{paper_text[:3000]}"],
                         config=types.GenerateContentConfig(temperature=0.0)
                     )
                     extracted_title = title_response.text.strip().replace('"', '').replace("'", "").replace("`", "")
@@ -286,51 +394,63 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                         print(f"✅ 成功提取并关联论文真实标题: {extracted_title}")
                 except Exception as e:
                     print(f"⚠️ 提取论文真实标题失败: {e}")
-  
-            print(f"🚀 [Gemini 请求发送] 正在向 {display_name} ({model_name}) 发起多模态学术解构请求，等待大模型生成报告中...")
-            response = client.models.generate_content(
-                model=model_name,
-                contents=[uploaded_file, f"请全面解构此论文: {title}"],
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.1
-                )
-            )
-            print(f"📥 [Gemini 响应接收] 成功接收大模型分析结果 (长度 {len(response.text) if response.text else 0} 字符)。")
-            _audit_api_call("gemini", model_name, request_label="paper_detailed_analysis")
-            
-            client.files.delete(name=uploaded_file.name)
-            print(f"🧹 [Gemini 临时文件清理] 已删除云端临时文件: {uploaded_file.name}")
-            analysis_result = response.text
-            save_ai_summary(paper_id, f"{display_name} ({model_name})", analysis_result)
-            print(f"✅ [Gemini 联合解构成功] 《{title}》解析完成，报告已成功落盘入库！")
 
-            # 注入 V2 检索层（幂等安全，失败不影响主流程）
-            try:
-                from .ingestion import ingest_pdf_to_v2_sync
-                # 读取最新 title（可能已由 is_manual 分支更新）
-                conn2 = get_db_connection()
-                _row2 = conn2.execute("SELECT title FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
-                conn2.close()
-                _latest_title = _row2["title"] if _row2 else title
-                ingest_pdf_to_v2_sync(
-                    doc_id=paper_id,
-                    title=_latest_title,
-                    pdf_path=pdf_path,
-                    source_type="local_pdf",
-                    authors=paper_authors,
-                    ai_summary=analysis_result
-                )
-            except Exception as _v2_err:
-                print(f"⚠️ V2 摄取注入失败（不影响主流程）: {_v2_err}")
+            import time
+            for attempt in range(3):
+                try:
+                    print(f"🚀 [Gemini 文本请求发送] 正在向 {display_name} ({model_name}) 发送文本解构请求 (尝试 {attempt+1}/3)...")
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=[f"以下是学术论文《{title}》的提取文本内容，请全面进行辩证客观解构：\n\n{paper_text}"],
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            temperature=0.1
+                        )
+                    )
+                    if response and response.text:
+                        analysis_result = response.text
+                        break
+                except Exception as txt_err:
+                    err_str = str(txt_err)
+                    if ("503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str) and attempt < 2:
+                        print(f"⏳ [Gemini 文本请求遇到瞬时负载] 第 {attempt+1}/3 次重试中...")
+                        time.sleep(3 * (attempt + 1))
+                        continue
+                    err_msg = f"❌ Gemini 联合解构失败: {txt_err}"
+                    print(err_msg)
+                    save_ai_summary(paper_id, f"{display_name} ({model_name})", err_msg)
+                    return err_msg
 
-            return analysis_result
-            
-        except Exception as e:
-            err_msg = f"❌ Gemini 联合解构失败: {e}"
-            print(err_msg)
+        if not analysis_result:
+            err_msg = f"❌ Gemini 联合解构失败: 未能获取大模型输出结果。"
             save_ai_summary(paper_id, f"{display_name} ({model_name})", err_msg)
             return err_msg
+
+        print(f"📥 [Gemini 响应接收] 成功接收大模型分析结果 (长度 {len(analysis_result)} 字符)。")
+        _audit_api_call("gemini", model_name, request_label="paper_detailed_analysis")
+        save_ai_summary(paper_id, f"{display_name} ({model_name})", analysis_result)
+        print(f"✅ [Gemini 联合解构成功] 《{title}》解析完成，报告已成功落盘入库！")
+
+        # 注入 V2 检索层（幂等安全，失败不影响主流程）
+        try:
+            from .ingestion import ingest_pdf_to_v2_sync
+            # 读取最新 title（可能已由 is_manual 分支更新）
+            conn2 = get_db_connection()
+            _row2 = conn2.execute("SELECT title FROM papers WHERE paper_id = ?", (paper_id,)).fetchone()
+            conn2.close()
+            _latest_title = _row2["title"] if _row2 else title
+            ingest_pdf_to_v2_sync(
+                doc_id=paper_id,
+                title=_latest_title,
+                pdf_path=pdf_path,
+                source_type="local_pdf",
+                authors=paper_authors,
+                ai_summary=analysis_result
+            )
+        except Exception as _v2_err:
+            print(f"⚠️ V2 摄取注入失败（不影响主流程）: {_v2_err}")
+
+        return analysis_result
     elif provider == "openai_compatible" or provider == "deepseek":
         if not api_key:
             err_msg = f"❌ [分析准备失败] 运行环境中缺失 API Key (未在 api_config.json 中设置，且未能在环境变量中读取)，分析终止。"
