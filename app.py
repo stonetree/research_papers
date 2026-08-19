@@ -26,7 +26,7 @@ import streamlit as st
 import os
 import json
 import threading
-from core.database import init_db, get_db_connection, resolve_pdf_path, insert_search_archive, get_search_archives, delete_search_archive, delete_paper_metadata, get_suspended_tasks, delete_suspended_task, get_paper_deconstruction_status
+from core.database import init_db, get_db_connection, resolve_pdf_path, insert_search_archive, get_search_archives, delete_search_archive, delete_paper_metadata, get_suspended_tasks, delete_suspended_task, get_paper_deconstruction_status, get_paper_analysis_versions, set_paper_default_version
 from core.suspended_task_manager import resume_suspended_search_task_sync
 from core.engine_semantic import execute_semantic_search
 from core.engine_arxiv import execute_arxiv_search
@@ -629,8 +629,17 @@ with tab_library:
         except ValueError:
             curr_idx = -1
             
+        versions = get_paper_analysis_versions(paper['paper_id'])
+        curr_v_num = st.session_state.get(f"view_version_{paper['paper_id']}")
+        active_ver = None
+        if versions:
+            if curr_v_num is not None:
+                active_ver = next((v for v in versions if v["version_num"] == curr_v_num), None)
+            if not active_ver:
+                active_ver = next((v for v in versions if v.get("is_default")), versions[-1])
+
         with st.container(border=True):
-            btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns([1, 1, 2.2, 2.2, 0.8])
+            btn_col1, btn_col2, btn_col3, btn_col4, btn_col5, btn_col6 = st.columns([1.1, 1.1, 1.6, 1.6, 2.0, 0.6])
             with btn_col1:
                 prev_disabled = (curr_idx <= 0)
                 if st.button("⏮️ 上一篇", key="prev_paper_btn", width="stretch", disabled=prev_disabled):
@@ -642,37 +651,46 @@ with tab_library:
                     st.session_state["active_view_paper_id"] = paper_ids[curr_idx + 1]
                     st.rerun()
             with btn_col3:
-                has_valid_analysis = paper.get('dialectical_analysis') and not paper['dialectical_analysis'].startswith("❌")
-                if has_valid_analysis:
+                brain_name = api_models.get(selected_analysis_model_id, {}).get("name", selected_analysis_model_id)
+                has_any_analysis = bool(active_ver or (paper.get('dialectical_analysis') and not paper['dialectical_analysis'].startswith("❌")))
+                re_btn_label = f"🔄 重新解构" if has_any_analysis else f"🤖 激活解构"
+                if st.button(re_btn_label, key=f"reanalyze_paper_btn_{paper['paper_id']}", width="stretch", type="primary" if not has_any_analysis else "secondary", help=f"使用当前选中的【{brain_name}】重新对该文献执行学术解构（历史版本将被永久保留）"):
+                    with st.spinner(f"正在使用 {brain_name} 对《{paper['title'][:20]}...》进行深度解构剖析..."):
+                        analysis_text = analyze_and_store_paper(paper['paper_id'], paper['pdf_path'], paper['title'], model_id=selected_analysis_model_id)
+                        if analysis_text.startswith("❌"):
+                            st.error(analysis_text)
+                        else:
+                            st.toast(f"✅ 《{paper['title'][:15]}...》已成功完成重新解构，并自动设为默认展示版本！")
+                            st.session_state.pop(f"view_version_{paper['paper_id']}", None)
+                            st.rerun()
+            with btn_col4:
+                export_text = active_ver["dialectical_analysis"] if active_ver else paper.get('dialectical_analysis')
+                has_valid_export = bool(export_text and not export_text.startswith("❌"))
+                if has_valid_export:
+                    v_suffix = f"_第{active_ver['version_num']}版" if active_ver else ""
                     st.download_button(
-                        label="📥 一键导出 Markdown 报告",
-                        data=paper['dialectical_analysis'],
-                        file_name=f"{paper['title']}_AI学术解构报告.md",
+                        label="📥 导出 Markdown",
+                        data=export_text,
+                        file_name=f"{paper['title']}{v_suffix}_AI学术解构报告.md",
                         mime="text/markdown",
                         key=f"export_detail_{paper['paper_id']}",
                         width="stretch"
                     )
                 else:
-                    brain_name = api_models[selected_analysis_model_id].get("name", selected_analysis_model_id)
-                    btn_label = f"🔄 重新激活 {brain_name} 解构" if paper['dialectical_analysis'] else f"🤖 激活 {brain_name} 解构"
-                    if st.button(btn_label, key=f"detail_activate_{paper['paper_id']}", width="stretch", type="primary"):
-                        with st.spinner("正在解构剖析中..."):
-                            analysis_text = analyze_and_store_paper(paper['paper_id'], paper['pdf_path'], paper['title'], model_id=selected_analysis_model_id)
-                            if analysis_text.startswith("❌"):
-                                st.error(analysis_text)
-                            else:
-                                st.rerun()
-            with btn_col4:
-                st.markdown(f"<div style='padding-top: 6px; font-size: 0.9rem; color: #4B5563; font-weight: bold; text-align: right;'>📖 进度: {curr_idx + 1}/{len(paper_ids)} 篇 | 🧠 剖析: {paper.get('model_name') or '待激活'}</div>", unsafe_allow_html=True)
+                    st.button("📥 导出 Markdown", key=f"export_disabled_{paper['paper_id']}", width="stretch", disabled=True, help="暂无有效解构内容可导出")
             with btn_col5:
+                active_model_desc = (active_ver['model_name'] if active_ver else paper.get('model_name')) or '待激活'
+                v_count_desc = f" | 🔖 共 {len(versions)} 版" if versions else ""
+                st.markdown(f"<div style='padding-top: 6px; font-size: 0.85rem; color: #4B5563; font-weight: bold; text-align: right;'>📖 进度: {curr_idx + 1}/{len(paper_ids)} 篇 | 🧠 {active_model_desc}{v_count_desc}</div>", unsafe_allow_html=True)
+            with btn_col6:
                 with st.popover("🗑️", help="删除文献元数据", use_container_width=True):
                     st.markdown("**🗑️ 彻底删除文献元数据**")
-                    st.caption("系统将从本地数据库中永久删除该文献的登记元数据及生成的 AI 全景解构报告（不删除本地 PDF 物理文件）。此操作不可逆，请谨慎操作。")
+                    st.caption("系统将从本地数据库中永久删除该文献的登记元数据及生成的所有 AI 全景解构历史版本（不删除本地 PDF 物理文件）。此操作不可逆，请谨慎操作。")
                     if st.button("🔥 确认删除", key=f"delete_paper_confirm_{paper['paper_id']}", use_container_width=True, type="primary"):
                         delete_paper_metadata(paper['paper_id'])
                         if "active_view_paper_id" in st.session_state:
                             del st.session_state["active_view_paper_id"]
-                        st.toast("🗑️ 文献元数据与解析报告已成功删除！")
+                        st.toast("🗑️ 文献元数据与所有历史解构版本已成功删除！")
                         st.rerun()
     else:
         st.info("💡 暂无正在阅读的文献数据。")
@@ -745,6 +763,18 @@ with tab_library:
         st.markdown("##### 💡 首席科学家 AI 辩证剖析报告")
         if paper:
             paper = dict(paper)
+            versions = get_paper_analysis_versions(paper['paper_id'])
+            
+            # 确定当前查看的版本
+            active_ver = None
+            if versions:
+                curr_v_num = st.session_state.get(f"view_version_{paper['paper_id']}")
+                if curr_v_num is not None:
+                    active_ver = next((v for v in versions if v["version_num"] == curr_v_num), None)
+                if not active_ver:
+                    active_ver = next((v for v in versions if v.get("is_default")), versions[-1])
+                    st.session_state[f"view_version_{paper['paper_id']}"] = active_ver["version_num"]
+
             # 独立滚动的右侧报告内容框 (高度设为 600px，与左侧框体完美绝对一致)
             with st.container(height=600):
                 st.markdown(f"### 📘 《{paper['title']}》")
@@ -754,7 +784,7 @@ with tab_library:
                 st.markdown(f"**👥 作者团队**: {paper['authors'] or '未知团队'}")
                 st.markdown(f"**📝 物理文件**: `{os.path.basename(paper['pdf_path']) if paper['pdf_path'] else '未关联'}`")
                 
-                # 格式化并渲染元数据信息 (来源、解析模型、添加时间、解析时间)
+                # 格式化并渲染元数据信息 (来源、解析模型、添加时间、解析时间、版本状态)
                 source_val = paper.get('source_engine', '')
                 if source_val == 'manual':
                     source_desc = "✍️ 手动添加"
@@ -767,13 +797,18 @@ with tab_library:
                 else:
                     source_desc = f"📁 {source_val}" if source_val else "📁 其他来源"
 
-                model_desc = paper.get('model_name')
-                if not model_desc or not paper.get('dialectical_analysis'):
+                if active_ver:
+                    model_desc = f"🧠 {active_ver['model_name']}"
+                    parse_time_desc = format_utc_to_local(active_ver['created_at'])
+                    ver_badge = f"🔖 第 {active_ver['version_num']} 版" + (" (⭐ 默认展示版本)" if active_ver.get("is_default") else " (🕒 历史存档版本)")
+                elif paper.get('dialectical_analysis') and not paper['dialectical_analysis'].startswith("❌"):
+                    model_desc = f"🧠 {paper.get('model_name') or '未知'}"
+                    parse_time_desc = format_utc_to_local(paper.get('updated_at'))
+                    ver_badge = "🔖 第 1 版 (⭐ 默认展示版本)"
+                else:
                     model_desc = "⏳ 尚未进行 AI 解析"
                     parse_time_desc = "⏳ 尚未进行 AI 解析"
-                else:
-                    model_desc = f"🧠 {model_desc}"
-                    parse_time_desc = format_utc_to_local(paper.get('updated_at'))
+                    ver_badge = "⏳ 暂无版本"
 
                 add_time_desc = format_utc_to_local(paper.get('created_at'))
                 
@@ -788,6 +823,10 @@ with tab_library:
                             <td style="border: none; padding: 4px 0; width: 50%;"><b>📅 添加时间</b>: {add_time_desc}</td>
                             <td style="border: none; padding: 4px 0; width: 50%;"><b>🕒 解析时间</b>: {parse_time_desc}</td>
                         </tr>
+                        <tr style="border: none;">
+                            <td style="border: none; padding: 4px 0; width: 50%;"><b>🏷️ 当前查看</b>: {ver_badge}</td>
+                            <td style="border: none; padding: 4px 0; width: 50%;"><b>📚 版本库</b>: 共 {len(versions)} 个解构版本</td>
+                        </tr>
                     </table>
                 </div>
                 """, unsafe_allow_html=True)
@@ -797,14 +836,56 @@ with tab_library:
                 
                 st.markdown("---")
                 
+                # 解构内容展示与多版本切换工具区
                 st.markdown("##### 💡 首席科学家 AI 剖析报告正文")
-                if paper['dialectical_analysis']:
+                
+                if versions:
+                    total_v = len(versions)
+                    if total_v > 1:
+                        v_col_ctrl, v_col_act = st.columns([3.2, 1.2])
+                        with v_col_ctrl:
+                            ver_nums = [v["version_num"] for v in versions]
+                            def _format_v_opt(v_num):
+                                v_item = next((v for v in versions if v["version_num"] == v_num), None)
+                                label = f"🔖 第 {v_num} 版"
+                                if v_item and v_item.get("is_default"):
+                                    label += " (⭐默认)"
+                                return label
+                                
+                            selected_v = st.segmented_control(
+                                "切换解构版本",
+                                options=ver_nums,
+                                default=active_ver["version_num"],
+                                format_func=_format_v_opt,
+                                key=f"seg_ver_{paper['paper_id']}",
+                                label_visibility="collapsed"
+                            )
+                            if selected_v is not None and selected_v != active_ver["version_num"]:
+                                st.session_state[f"view_version_{paper['paper_id']}"] = selected_v
+                                st.rerun()
+                        with v_col_act:
+                            if not active_ver.get("is_default"):
+                                if st.button("⭐ 设为默认展示", key=f"btn_set_def_{paper['paper_id']}_{active_ver['version_num']}", use_container_width=True, help="将当前查看的版本设为这篇论文的默认解构报告"):
+                                    set_paper_default_version(paper['paper_id'], active_ver['version_num'])
+                                    st.toast(f"✅ 已将第 {active_ver['version_num']} 版设为该文献的默认展示内容！")
+                                    st.rerun()
+                            else:
+                                st.markdown("<div style='text-align: center; padding-top: 6px; font-size: 0.85rem; color: #10B981; font-weight: bold;'>⭐ 当前默认版本</div>", unsafe_allow_html=True)
+                    else:
+                        st.caption(f"🔖 当前为 **第 1 版** 解构内容（默认）。如需重新生成，可点击上方工具栏中的【🔄 重新解构】。")
+                    
+                    # 明确标识当前展示的解构版本
+                    def_tag = "（⭐ 默认展示版本）" if active_ver.get("is_default") else "（🕒 历史存档版本）"
+                    st.info(f"📋 **正在展示：第 {active_ver['version_num']} 版解构内容** {def_tag} | 🧠 解析大脑: `{active_ver['model_name']}` | 🕒 解析时间: {format_utc_to_local(active_ver['created_at'])}")
+                    st.markdown(active_ver['dialectical_analysis'])
+                elif paper.get('dialectical_analysis'):
                     if paper['dialectical_analysis'].startswith("❌"):
                         st.error(paper['dialectical_analysis'])
                     else:
+                        st.info("📋 **正在展示：第 1 版解构内容**（⭐ 默认展示版本）")
                         st.markdown(paper['dialectical_analysis'])
                 else:
-                    st.warning("⏳ 暂无该论文的 AI 深度解构。")
+                    st.warning("⏳ 暂无该论文的 AI 深度解构。请点击上方工具栏中的【🔄 重新解构】（或【🤖 激活解构】）按钮发起剖析。")
         else:
             with st.container(height=600):
                 st.markdown("<h3 style='text-align: center; color: #4B5563; padding-top: 150px;'>🪐 个人学术大仓阅读器</h3>", unsafe_allow_html=True)

@@ -67,6 +67,21 @@ def init_db():
     ''')
 
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS paper_analysis_versions (
+            version_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            paper_id TEXT NOT NULL,
+            version_num INTEGER NOT NULL,
+            model_name TEXT,
+            dialectical_analysis TEXT NOT NULL,
+            is_default INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (paper_id) REFERENCES papers (paper_id) ON DELETE CASCADE,
+            UNIQUE(paper_id, version_num)
+        )
+    ''')
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_paper_analysis_versions_paper_id ON paper_analysis_versions(paper_id);")
+
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS search_archives (
             archive_id TEXT PRIMARY KEY,
             query TEXT NOT NULL,
@@ -357,6 +372,27 @@ def sync_ingested_documents_to_papers():
     finally:
         conn.close()
 
+    # 存量 ai_summaries 自动平滑升版为 paper_analysis_versions 的第 1 版
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR IGNORE INTO paper_analysis_versions (paper_id, version_num, model_name, dialectical_analysis, is_default, created_at)
+            SELECT s.paper_id, 1, s.model_name, s.dialectical_analysis, 1, COALESCE(s.updated_at, CURRENT_TIMESTAMP)
+            FROM ai_summaries s
+            WHERE s.dialectical_analysis IS NOT NULL 
+              AND s.dialectical_analysis != '' 
+              AND s.dialectical_analysis NOT LIKE '❌%'
+              AND NOT EXISTS (
+                  SELECT 1 FROM paper_analysis_versions v WHERE v.paper_id = s.paper_id
+              )
+        ''')
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"存量 ai_summaries 升版至 paper_analysis_versions 失败: {e}")
+    finally:
+        conn.close()
+
     logger.info("数据库核心表及规则种子完成初始化。")
 
 # === 4. 保留并重构 V1 的数据操作函数以保持系统稳定性 ===
@@ -373,17 +409,110 @@ def insert_paper(paper_data):
     finally:
         conn.close()
 
-def save_ai_summary(paper_id, model_name, analysis_text):
+def get_paper_analysis_versions(paper_id):
+    """获取指定论文的所有历史与当前 AI 解构版本列表（按版本号升序排列）"""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute('''
+            SELECT version_id, paper_id, version_num, model_name, dialectical_analysis, is_default, created_at
+            FROM paper_analysis_versions
+            WHERE paper_id = ?
+            ORDER BY version_num ASC
+        ''', (paper_id,)).fetchall()
+        
+        versions = [dict(r) for r in rows]
+        # 若版本表暂无记录但 ai_summaries 中有有效记录，自动补充为第 1 版
+        if not versions:
+            s_row = conn.execute('SELECT model_name, dialectical_analysis, updated_at FROM ai_summaries WHERE paper_id = ?', (paper_id,)).fetchone()
+            if s_row and s_row["dialectical_analysis"] and not s_row["dialectical_analysis"].startswith("❌"):
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR IGNORE INTO paper_analysis_versions (paper_id, version_num, model_name, dialectical_analysis, is_default, created_at)
+                    VALUES (?, 1, ?, ?, 1, ?)
+                ''', (paper_id, s_row["model_name"], s_row["dialectical_analysis"], s_row["updated_at"]))
+                conn.commit()
+                rows = conn.execute('''
+                    SELECT version_id, paper_id, version_num, model_name, dialectical_analysis, is_default, created_at
+                    FROM paper_analysis_versions
+                    WHERE paper_id = ?
+                    ORDER BY version_num ASC
+                ''', (paper_id,)).fetchall()
+                versions = [dict(r) for r in rows]
+        return versions
+    finally:
+        conn.close()
+
+def save_paper_analysis_version(paper_id, model_name, analysis_text, set_as_default=True):
+    """保存论文 AI 解构内容。成功解构时新增独立版本并完整保留所有历史版本；失败时不覆盖既有有效版本"""
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute('''
-            INSERT OR REPLACE INTO ai_summaries (paper_id, model_name, dialectical_analysis)
-            VALUES (?, ?, ?)
-        ''', (paper_id, model_name, analysis_text))
+        is_error = not analysis_text or analysis_text.strip().startswith("❌")
+        if not is_error:
+            # 1. 计算递增版本号
+            cursor.execute("SELECT IFNULL(MAX(version_num), 0) FROM paper_analysis_versions WHERE paper_id = ?", (paper_id,))
+            max_v = cursor.fetchone()[0]
+            new_v = max_v + 1
+            
+            # 2. 若设为默认展示，更新旧版本状态
+            if set_as_default:
+                cursor.execute("UPDATE paper_analysis_versions SET is_default = 0 WHERE paper_id = ?", (paper_id,))
+                
+            cursor.execute('''
+                INSERT INTO paper_analysis_versions (paper_id, version_num, model_name, dialectical_analysis, is_default, created_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (paper_id, new_v, model_name, analysis_text, 1 if set_as_default else 0))
+            
+            # 3. 同步更新 ai_summaries 保证全局向后兼容
+            if set_as_default:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO ai_summaries (paper_id, model_name, dialectical_analysis, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (paper_id, model_name, analysis_text))
+            conn.commit()
+            return True, new_v
+        else:
+            # 解构失败：若此前无任何有效版本，则将错误信息暂存到 ai_summaries 便于 UI 提示
+            cursor.execute("SELECT COUNT(*) FROM paper_analysis_versions WHERE paper_id = ? AND dialectical_analysis NOT LIKE '❌%'", (paper_id,))
+            has_valid = cursor.fetchone()[0] > 0
+            if not has_valid:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO ai_summaries (paper_id, model_name, dialectical_analysis, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (paper_id, model_name, analysis_text))
+            conn.commit()
+            return False, 0
+    finally:
+        conn.close()
+
+def set_paper_default_version(paper_id, version_num):
+    """将指定的历史解构版本设为该文献的默认展示版本，并同步更新 ai_summaries"""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # 1. 更新 paper_analysis_versions 中的 is_default 标识
+        cursor.execute("UPDATE paper_analysis_versions SET is_default = 0 WHERE paper_id = ?", (paper_id,))
+        cursor.execute("UPDATE paper_analysis_versions SET is_default = 1 WHERE paper_id = ? AND version_num = ?", (paper_id, version_num))
+        
+        # 2. 查询该版本具体内容并同步回 ai_summaries
+        row = cursor.execute('''
+            SELECT model_name, dialectical_analysis, created_at 
+            FROM paper_analysis_versions 
+            WHERE paper_id = ? AND version_num = ?
+        ''', (paper_id, version_num)).fetchone()
+        
+        if row:
+            cursor.execute('''
+                INSERT OR REPLACE INTO ai_summaries (paper_id, model_name, dialectical_analysis, updated_at)
+                VALUES (?, ?, ?, ?)
+            ''', (paper_id, row["model_name"], row["dialectical_analysis"], row["created_at"]))
         conn.commit()
     finally:
         conn.close()
+
+def save_ai_summary(paper_id, model_name, analysis_text):
+    """兼容旧接口：将解构报告保存为一个新版本并默认展示"""
+    return save_paper_analysis_version(paper_id, model_name, analysis_text, set_as_default=True)
 
 def resolve_pdf_path(db_path):
     """将数据库中存储的 PDF 路径动态解析为当前运行环境下的有效路径，保证完美移植性"""
@@ -439,7 +568,8 @@ def delete_paper_metadata(paper_id):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        # Delete from dependencies first (ai_summaries has foreign key to papers)
+        # Delete from dependencies first (ai_summaries and paper_analysis_versions have foreign key to papers)
+        cursor.execute('DELETE FROM paper_analysis_versions WHERE paper_id = ?', (paper_id,))
         cursor.execute('DELETE FROM ai_summaries WHERE paper_id = ?', (paper_id,))
         # Then delete from papers table
         cursor.execute('DELETE FROM papers WHERE paper_id = ?', (paper_id,))

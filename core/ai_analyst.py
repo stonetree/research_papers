@@ -838,3 +838,150 @@ def model_web_search(query_string, model_id):
             return False, f"API 请求失败 (HTTP {response.status_code}): {response.text}"
     except Exception as e:
         return False, f"模型检索过程中发生异常: {e}"
+
+def evaluate_candidates_relevance_batch(candidates, query_string, model_id):
+    """
+    大模型摘要批量初评：对打捞出的学术文献候选列表进行质量初审与相关度评分。
+    为每个 candidate 补充 `score`、`recommendation`、`critique` 字段，并按分数降序排序。
+    """
+    import json
+    if not candidates:
+        return []
+
+    def _apply_fallback(c_list, default_critique="未配置可用大模型或调用降级，暂未生成 AI 摘要初评。"):
+        enriched = []
+        for idx, item in enumerate(c_list):
+            copy_item = dict(item)
+            if "score" not in copy_item or copy_item["score"] is None:
+                copy_item["score"] = 75
+            if "recommendation" not in copy_item or not copy_item["recommendation"]:
+                copy_item["recommendation"] = "待初审"
+            if "critique" not in copy_item or not copy_item["critique"]:
+                copy_item["critique"] = default_critique
+            enriched.append(copy_item)
+        return enriched
+
+    cfg = get_model_config(model_id)
+    if not cfg:
+        print(f"⚠️ 摘要初评提示：未找到模型 {model_id} 配置，执行保底降级。")
+        return _apply_fallback(candidates)
+
+    provider = cfg.get("provider", "openai_compatible")
+    model_name = cfg.get("model", model_id)
+    api_key = cfg.get("resolved_api_key", "").strip()
+    api_url = cfg.get("url", "").strip()
+
+    if not api_key or (provider != "gemini" and not api_url):
+        print(f"⚠️ 摘要初评提示：模型 {model_id} 缺少 API Key 或 API URL，执行保底降级。")
+        return _apply_fallback(candidates)
+
+    candidates_text = ""
+    for i, c in enumerate(candidates):
+        title = c.get("title", "无标题")
+        authors = c.get("authors", "未知作者")
+        venue = c.get("year_venue") or c.get("venue") or "未知来源"
+        abstract = c.get("abstract") or c.get("summary") or "暂无摘要描述"
+        candidates_text += f"[文献 {i+1}]\n- 序号: {i+1}\n- 标题: {title}\n- 作者/团队: {authors}\n- 发表来源: {venue}\n- 摘要: {abstract[:400]}\n\n"
+
+    system_instruction = (
+        "你是一个极其严谨、具有深厚软硬件系统底层底蕴的 AI 首席科学家与文献评审专家。\n"
+        "用户为你提供了一个当前检索的技术主题（Query），以及一组候选文献的标题、作者、发表来源与摘要列表。\n"
+        "请逐篇对候选文献进行相关性与质量初评，从底层软硬件系统设计、算法创新度、工程落地价值以及与检索主题的贴合度出发，为每篇文献输出客观评级。\n\n"
+        "请必须以标准的 JSON 数组格式返回评级结果，每个 JSON 对象包含以下字段：\n"
+        "1. \"index\": 候选文献的序号（整数，从 1 开始，与输入的文献序号对应）\n"
+        "2. \"score\": 相关性与学术质量综合得分（整数，0 - 100 分）\n"
+        "3. \"recommendation\": 推荐等级（从以下选项中选择一个：'强烈推荐'、'高度推荐'、'一般推荐'、'不推荐'）\n"
+        "4. \"critique\": 一句话核心技术点评与相关度依据（中文，30-80字，客观阐述其核心创新点与用户主题的相关性）\n\n"
+        "不要包含任何解释性文字或 markdown 代码块，直接返回标准 JSON 数组字符串，例如：\n"
+        '[{"index": 1, "score": 92, "recommendation": "强烈推荐", "critique": "紧扣主题..."}, ...]'
+    )
+
+    user_prompt = (
+        f"检索主题：{query_string}\n\n"
+        f"候选文献列表：\n{candidates_text}\n"
+        "请按要求对上述每篇文献进行初审评分与点评，返回 JSON 数组。"
+    )
+
+    eval_json = None
+    if provider == "gemini":
+        try:
+            client = genai.Client(api_key=api_key)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.1
+                )
+            )
+            _audit_api_call("gemini", model_name, request_label="paper_abstract_relevance")
+            text = clean_json_string(response.text)
+            eval_json = json.loads(text)
+        except Exception as e:
+            print(f"⚠️ Gemini 摘要初评异常: {e}")
+
+    elif provider in ("openai_compatible", "deepseek", "dashscope"):
+        try:
+            messages = [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_prompt}
+            ]
+            is_responses_api = bool(api_url and "/responses" in api_url)
+            response = make_llm_request(api_url, api_key, model_name, messages, temperature=0.1, timeout=60, custom_params=cfg.get("custom_params"))
+            if response.status_code == 200:
+                _audit_api_call(provider, model_name, api_url, "paper_abstract_relevance")
+                content, err = parse_llm_response(response, is_responses_api)
+                if not err and content:
+                    text = clean_json_string(content)
+                    eval_json = json.loads(text)
+                else:
+                    print(f"⚠️ 解析摘要初评响应失败: {err}")
+            else:
+                print(f"⚠️ 摘要初评 API 调用失败 (HTTP {response.status_code}): {response.text}")
+        except Exception as e:
+            print(f"⚠️ 摘要初评请求异常: {e}")
+
+    # 解析 LLM 输出并融合到候选结果中
+    if isinstance(eval_json, list) and len(eval_json) > 0:
+        eval_map = {}
+        for idx, item in enumerate(eval_json):
+            if isinstance(item, dict):
+                idx_key = item.get("index", idx + 1)
+                eval_map[idx_key] = item
+                eval_map[idx] = item
+
+        enriched = []
+        for i, c in enumerate(candidates):
+            copy_item = dict(c)
+            eval_info = eval_map.get(i + 1) or eval_map.get(i)
+            if eval_info and isinstance(eval_info, dict):
+                score = eval_info.get("score", 75)
+                try:
+                    score = int(score)
+                except Exception:
+                    score = 75
+                rec = eval_info.get("recommendation")
+                if not rec:
+                    if score >= 90:
+                        rec = "强烈推荐"
+                    elif score >= 75:
+                        rec = "高度推荐"
+                    elif score >= 60:
+                        rec = "一般推荐"
+                    else:
+                        rec = "不推荐"
+                critique = eval_info.get("critique", "已完成大模型相关性初审。")
+                copy_item["score"] = score
+                copy_item["recommendation"] = rec
+                copy_item["critique"] = critique
+            else:
+                copy_item["score"] = 70
+                copy_item["recommendation"] = "一般推荐"
+                copy_item["critique"] = "已完成文献打捞，待深入精细化解构。"
+            enriched.append(copy_item)
+
+        enriched.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return enriched
+
+    return _apply_fallback(candidates)
+
