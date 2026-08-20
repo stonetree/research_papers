@@ -48,9 +48,10 @@ No lint, typecheck, formatter, or test framework is configured. No `requirements
 - Env var access: use `get_env_var()` from `core/env_helper.py` (not `os.environ.get()`). It falls back to Windows registry and root `.env` file — 5 core modules depend on this.
 - `cost_manager.py` enforces daily/weekly USD budget circuit-breakers on paid API calls.
 
-## Code Conventions
+## Code Conventions & Workflow
 
 - All source files use `# -*- coding: utf-8 -*-` header.
 - UI text, comments, and log messages are primarily in Chinese (Simplified).
 - Config loading goes through `core/config_loader.py` — never read `api_config.json` directly.
 - PDF paths stored in DB use relative `storage/library/filename.pdf` form. `resolve_pdf_path()` in `core/database.py` handles cross-machine portability by extracting filenames from legacy absolute paths.
+- **Auto-commit on Completion (自动代码提交)**: 每当完成一个功能开发、优化或修复一个 bug 并在验证通过后，必须自动执行 Git 提交代码 (`git add` + `git commit`)，附带清晰准确的提交信息，保持代码仓库版本闭环。

@@ -50,6 +50,7 @@ class DailyRadarPipeline:
         
         prompt = (
             "请搜索过去 24 小时全球关于 AI 基础设施、大模型推理加速、高带宽芯片总线或异构计算领域的最新 10 条突破性进展。\n"
+            "【核心抓取关键词与技术方向】：除通用 AI 基础设施外，必须重点检索并覆盖 kvcache（KV Cache 显存优化、卸载换入换出、压缩量化、长上下文加速）与 agent（AI Agent 智能体架构、AIOS、环境交互与动作生成、工具调用）两个关键技术方向的最新硬核突破。\n"
             "剔除一切炒作、资本吹嘘与公关软文。每个项目必须包含：\n"
             "1. 标题 (title)\n"
             "2. 权威来源/URL (url)\n"
@@ -328,7 +329,7 @@ class DailyAutomationOrchestrator:
         logger.info("正在通过 Exa 神经网络引擎打捞当日最新的 20 篇 AI/LLM 领域 arXiv 论文元数据...")
         try:
             exa_raw_papers = await self.exa_client.search_and_extract_highlights(
-                query="site:arxiv.org large language model inference microarchitecture optimization",
+                query="site:arxiv.org (large language model OR LLM) (kvcache OR \"KV cache\" OR agent OR \"AI agent\" OR inference microarchitecture)",
                 num_results=20,
                 db_path=self.db_path
             )
