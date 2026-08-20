@@ -80,7 +80,7 @@ def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
             "https": proxy_url
         }
         
-    # 显式注入 Google Search 工具以启用强联网搜索
+    # 显式注入 Google Search 工具与生成参数以启用强联网搜索并释放最大 Token 上限
     payload = {
         "contents": [{
             "parts": [{
@@ -91,7 +91,11 @@ def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
             {
                 "google_search": {}
             }
-        ]
+        ],
+        "generationConfig": {
+            "maxOutputTokens": 65536,
+            "temperature": 0.3
+        }
     }
     
     if system_instruction:
@@ -116,7 +120,10 @@ def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
             
             json_data = response.json()
             
-            candidate = json_data['candidates'][0]
+            candidate = json_data.get('candidates', [{}])[0]
+            finish_reason = candidate.get('finishReason', '')
+            if finish_reason == 'MAX_TOKENS':
+                print(f"[{datetime.datetime.now()}] ⚠️ 警告: Gemini 简报生成触发了 MAX_TOKENS 截断！")
             
             # 提取并检验联网元数据 Grounding Metadata (兼容 Gemini REST API 的驼峰体与下划线命名)
             grounding_metadata = candidate.get('groundingMetadata') or candidate.get('grounding_metadata') or {}
@@ -128,7 +135,13 @@ def call_gemini_api_with_search(prompt, system_instruction=None, config=None):
             else:
                 print(f"[{datetime.datetime.now()}] [警告] Gemini 未触发联网搜索，可能使用了内部陈旧知识回答！")
                 
-            return candidate['content']['parts'][0]['text']
+            # 完整提取并拼接所有正文 parts，过滤思维链 thought 数据
+            parts = candidate.get('content', {}).get('parts', [])
+            full_text = "".join(p.get('text', '') for p in parts if not p.get('thought', False))
+            if full_text.strip():
+                return full_text
+            else:
+                raise ValueError("Gemini API 返回了空的正文内容。")
             
         except requests.exceptions.RequestException as e:
             last_err = e
@@ -370,7 +383,9 @@ def test_briefing_api_connection(api_key, model_name, proxy_url=None):
         
         if response.status_code == 200:
             res_json = response.json()
-            reply = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+            candidate = res_json.get('candidates', [{}])[0]
+            parts = candidate.get('content', {}).get('parts', [])
+            reply = "".join(p.get('text', '') for p in parts if not p.get('thought', False)).strip()
             return True, f"成功连接至 {model_name}！响应回复: '{reply}'", latency
         else:
             return False, f"HTTP {response.status_code}: {response.text}", 0.0
