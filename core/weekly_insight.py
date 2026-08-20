@@ -219,7 +219,8 @@ class WeeklyInsightPipeline:
                     contents=f"证据卡片矩阵：\n{cards_text}\n\n请严格基于此矩阵撰写每周深度洞察白皮书。",
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
-                        temperature=0.1
+                        temperature=0.1,
+                        max_output_tokens=65536
                     )
                 )
             )

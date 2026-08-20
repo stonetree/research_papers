@@ -78,7 +78,8 @@ class DailyRadarPipeline:
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         tools=[{"google_search": {}}],  # 强制激活 Grounding
-                        temperature=0.1
+                        temperature=0.1,
+                        max_output_tokens=65536
                     )
                 )
             )

@@ -340,7 +340,8 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                                 contents=[uploaded_file, f"请全面解构此论文: {title}"],
                                 config=types.GenerateContentConfig(
                                     system_instruction=system_instruction,
-                                    temperature=0.1
+                                    temperature=0.1,
+                                    max_output_tokens=65536
                                 )
                             )
                             if response and response.text:
@@ -404,7 +405,8 @@ def analyze_and_store_paper(paper_id, pdf_path, title, model_id="deepseek-v4"):
                         contents=[f"以下是学术论文《{title}》的提取文本内容，请全面进行辩证客观解构：\n\n{paper_text}"],
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
-                            temperature=0.1
+                            temperature=0.1,
+                            max_output_tokens=65536
                         )
                     )
                     if response and response.text:
@@ -691,7 +693,8 @@ def arbitrate_papers(candidates, topic_name, model_id):
                 contents=user_prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
-                    temperature=0.1
+                    temperature=0.1,
+                    max_output_tokens=8192
                 )
             )
             _audit_api_call("gemini", model_name, request_label="paper_abstract_relevance")
@@ -911,7 +914,8 @@ def evaluate_candidates_relevance_batch(candidates, query_string, model_id):
                 contents=user_prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
-                    temperature=0.1
+                    temperature=0.1,
+                    max_output_tokens=8192
                 )
             )
             _audit_api_call("gemini", model_name, request_label="paper_abstract_relevance")

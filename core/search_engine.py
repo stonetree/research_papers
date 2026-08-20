@@ -291,6 +291,7 @@ async def api_answer(
         for attempt in range(3):
             try:
                 from google import genai
+                from google.genai import types
                 client = genai.Client(api_key=api_key)
                 
                 loop = asyncio.get_running_loop()
@@ -298,7 +299,11 @@ async def api_answer(
                     None,
                     lambda: client.models.generate_content(
                         model=actual_model_name,
-                        contents=prompt
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            max_output_tokens=65536,
+                            temperature=0.2
+                        )
                     )
                 )
                 answer_text = response.text.strip() if response and response.text else ""
